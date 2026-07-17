@@ -66,8 +66,6 @@ class PhonebookBuilder:
         self.last_error: str | None = None
         self.contact_count = 0
         self.entry_count = 0
-        self.favorite_count = 0
-        self.unmatched_favorites: list[str] = []
         # Optional: meldet source_broken/Recovery. Ohne Notifier bleibt alles still —
         # so bleiben Builder-Tests frei von Mailversand.
         self._notifier = notifier
@@ -209,14 +207,6 @@ class PhonebookBuilder:
                                     "Das Telefonbuch bleibt auf dem letzten guten Stand.")
                 return cfgmod.CACHE_PATH.exists()
 
-            # Kein Grund, den Build abzubrechen: ein Favorit ohne Treffer ist ein
-            # Tippfehler in der Liste, kein Datenproblem. Aber sichtbar muss er sein,
-            # sonst sucht man den Fehler am Telefon.
-            self.unmatched_favorites = convert.mark_favorites(contacts, cfg.get("favorites"))
-            if self.unmatched_favorites:
-                LOGGER.warning("Favoriten ohne Treffer: %s",
-                               ", ".join(self.unmatched_favorites))
-
             try:
                 xml = convert.to_grandstream_xml(contacts)
                 entries = xml.count(b"<Contact>")
@@ -234,12 +224,10 @@ class PhonebookBuilder:
 
             self.contact_count = len(contacts)
             self.entry_count = entries
-            self.favorite_count = sum(1 for c in contacts if c.favorite)
             self.last_error = None
             self._report_long_names(contacts)
-            LOGGER.info("Telefonbuch gebaut: %d Kontakte -> %d Einträge, "
-                        "%d Favoriten, %d Bytes",
-                        len(contacts), entries, self.favorite_count, len(xml))
+            LOGGER.info("Telefonbuch gebaut: %d Kontakte -> %d Einträge, %d Bytes",
+                        len(contacts), entries, len(xml))
             self._report(True)
             return True
 
@@ -359,10 +347,6 @@ def parse_settings(raw: dict) -> tuple[dict | None, list[str]]:
     if not accounts:
         errors.append("Accounts: mindestens einer")
 
-    # Nicht validieren, ob die Einträge existieren: die Kontakte sind hier nicht
-    # geladen, und ein Tippfehler soll das Speichern nicht blockieren. Er taucht im
-    # Log und im Report als "ohne Treffer" auf.
-    favorites = [f.strip() for f in str(raw.get("favorites", "")).split(",") if f.strip()]
 
     source_base = str(raw.get("source_base", "")).strip()
     if not source_base:
@@ -386,7 +370,6 @@ def parse_settings(raw: dict) -> tuple[dict | None, list[str]]:
     return {
         "accounts": accounts,
         "source_base": source_base,
-        "favorites": favorites,
         "bind": bind,
         "port": port,
         "basic_auth_user": user,
@@ -503,10 +486,9 @@ class PhonebookApp(rumps.App):
             self.status_item.title = f"Status: {self.builder.last_error}"
         else:
             self.status_item.title = f"Status: läuft ({self.cfg['bind']}:{self.cfg['port']})"
-        fav = self.builder.favorite_count
         self.count_item.title = (
             f"Kontakte: {self.builder.contact_count} "
-            f"({self.builder.entry_count} Einträge, {fav} Favoriten)")
+            f"({self.builder.entry_count} Einträge)")
 
     def _reload_if_changed(self):
         """Lädt settings.json neu, wenn sie sich geändert hat.
@@ -532,15 +514,15 @@ class PhonebookApp(rumps.App):
 
     def _apply_settings(self, old):
         """Übernimmt geänderte Einstellungen. Neustart NUR bei Listener-relevanten
-        Feldern — Quelle, Favoriten und Mail-Felder greifen sofort (Muster mailrelay)."""
+        Feldern — Quelle und Mail-Felder greifen sofort (Muster mailrelay)."""
         if any(old.get(k) != self.cfg.get(k) for k in ("bind", "port", "basic_auth_user")):
             self.log.info("Listener-relevante Änderung -> Server neu starten")
             self.restart()
         else:
-            # force=True ist hier Pflicht, nicht Bequemlichkeit: eine geänderte
-            # Favoritenliste (oder ein anderer Account) fasst KEINE Quelldatei an.
-            # Die mtime-Prüfung sähe "alles unverändert" und der Rebuild bliebe aus —
-            # die neue Einstellung hätte schlicht keine Wirkung.
+            # force=True ist hier Pflicht, nicht Bequemlichkeit: ein geänderter
+            # Account fasst KEINE Quelldatei an. Die mtime-Prüfung sähe "alles
+            # unverändert", der Rebuild bliebe aus, und die neue Einstellung hätte
+            # schlicht keine Wirkung.
             self.builder.refresh(self.cfg, force=True)
 
     # -- Aktionen ------------------------------------------------------------
@@ -549,20 +531,15 @@ class PhonebookApp(rumps.App):
 
         Im Normalbetrieb überflüssig: bei jedem Poll wird ohnehin geprüft, und
         Einstellungsänderungen bauen selbst neu. Der Punkt ist für Ungeduld und zum
-        Nachsehen, ob die Favoriten greifen, ohne aufs Telefon zu warten.
         """
         self.builder.refresh(self.cfg, force=True)
         if self.builder.last_error:
             rumps.notification(APP_TITLE, "Telefonbuch nicht aktualisiert",
                                self.builder.last_error, sound=False)
             return
-        # Die Favoriten gehören in die Rückmeldung: sie sind meist der Grund, warum
-        # man den Punkt überhaupt drückt.
-        msg = (f"{self.builder.contact_count} Kontakte, "
-               f"{self.builder.favorite_count} Favoriten")
-        if self.builder.unmatched_favorites:
-            msg += f" — ohne Treffer: {', '.join(self.builder.unmatched_favorites)}"
-        rumps.notification(APP_TITLE, "Telefonbuch aktualisiert", msg, sound=False)
+        rumps.notification(APP_TITLE, "Telefonbuch aktualisiert",
+                           f"{self.builder.contact_count} Kontakte, "
+                           f"{self.builder.entry_count} Einträge", sound=False)
 
     def restart(self):
         if self.httpd is not None:
@@ -586,13 +563,9 @@ class PhonebookApp(rumps.App):
             ("Quelle", [
                 ("Accounts", "text", "accounts"),
                 ("Basisordner", "text", "source_base"),
-                ("Favoriten", "text", "favorites"),
             ], "Accounts kommagetrennt, Reihenfolge = Priorität beim Entdoppeln.\n"
                "Basisordner ist der iCloudSync-Spiegel; darunter wird "
-               "<Account>/Contacts/ gelesen.\n"
-               "Favoriten: Namen (wie am Telefon angezeigt, inkl. Spitzname) oder "
-               "Rufnummern, kommagetrennt. Nötig, weil iCloud kein Favoriten-Flag "
-               "kennt und das Telefon seine Markierung bei jedem Download verliert."),
+               "<Account>/Contacts/ gelesen."),
             ("Server", [
                 ("Adresse", "text", "bind"),
                 ("Port", "int", "port"),
@@ -615,7 +588,6 @@ class PhonebookApp(rumps.App):
         ]
         initial = dict(self.cfg)
         initial["accounts"] = ", ".join(self.cfg.get("accounts") or [])
-        initial["favorites"] = ", ".join(self.cfg.get("favorites") or [])
         # Leer heißt "unverändert" — beim allerersten Mal gibt es aber nichts zu
         # behalten, da ist ein fertiger Vorschlag hilfreicher als ein leeres Feld.
         initial["password"] = "" if has_pw else secrets.token_urlsafe(12)

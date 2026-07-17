@@ -110,7 +110,7 @@ curl -u wp826:… http://192.168.2.1:8081/phonebook.xml | xmllint --format -
 **Aus dem LAN testen, nicht nur über `127.0.0.1`** — ein py2app-Bundle kann sich beim
 Loopback anders verhalten als im Netz (bei MailRelay ist genau das aufgefallen).
 
-## Spitzname und Favoriten
+## Spitzname als Anzeigename
 
 **Spitzname ersetzt den Anzeigenamen.** Hat ein Kontakt in iCloud einen Spitznamen,
 steht am Telefon nur dieser: aus „Evi Schmitt" wird „Oma Evi". So heißen die Leute im
@@ -121,26 +121,40 @@ kein Spitznamensfeld, also muss er in `FirstName`; `LastName` bleibt leer.
 > verliert `icloud-sync` den Spitznamen in seiner vCard — ein weiterer Grund, das
 > JSON zu lesen und nicht die vCard.
 
-**Favoriten** setzen `<Frequent>1</Frequent>`. Nötig, weil zwei Dinge zusammenkommen:
-iCloud kennt kein Favoriten-Flag (Apples Favoriten leben in der Telefon-App und kommen
-nicht über die Kontakte-API), und das WP826 baut seine Einträge bei jedem Download aus
-dem XML neu — eine am Gerät gesetzte Markierung wäre nach dem nächsten Poll weg.
+## Favoriten sind eine Geräte-Funktion
 
-Die Liste steht deshalb in den Einstellungen. Ein Eintrag darf ein **Name** sein (wie
-am Telefon angezeigt, also inklusive Spitzname) oder eine **Rufnummer** (Schreibweise
-egal, verglichen wird normalisiert):
+**Nicht über das XML setzbar.** Der WP8x6 User Guide beschreibt „Favorite" ausschließlich
+als Teil von **Quick Transfer**: eine Liste, aus der man im Gespräch per Quick-Access-Taste
+weiterverbindet.
 
-```json
-"favorites": ["Oma Evi", "Opa Herbert", "+491701234567"]
-```
+- Markieren am Telefon: **Contacts → Options → „Add to Favorite"** — und zwar pro
+  **Rufnummer**, nicht pro Kontakt.
+- Taste belegen: Web UI → **Application → Quick Access → Quick Access Key Long Press →
+  Favorite**.
+- Die Liste ist **unsichtbar, solange sie leer ist**. Für die Block List steht das wörtlich
+  im User Guide („at least one contact must be blocked for this list to be visible"); die
+  Favorite-Liste verhält sich genauso. Wer sie sucht, bevor der erste Favorit existiert,
+  findet sie nicht.
 
-Einträge ohne Treffer werden **nicht verschluckt** — sie landen im Log und im Report
-unter „ACHTUNG, ohne Treffer". Sonst sucht man einen Tippfehler am Telefon statt in
-der Konfiguration.
+`<Frequent>1</Frequent>` **erzeugt keine Favoriten** — am Gerät geprüft: sieben Kontakte
+trugen das Flag, in der Liste stand nur der von Hand markierte. Das Feld stammt aus dem
+WP820-Guide, dessen Contact-Tabelle auf den **GXV3275** verweist; im ganzen WP8x6 User
+Guide kommt `frequent` im Kontakt-Zusammenhang nicht vor. Ein Erbstück.
 
-Bei einem Kontakt mit so vielen Nummern, dass ein Folge-Eintrag entsteht, ist nur der
-**erste** Favorit: „Name (2)" ist eine Notlösung für überzählige Nummern, kein
-zweiter Favorit.
+### Warum Favoriten trotzdem verschwinden können
+
+**Ein stabiles XML ist die Voraussetzung.** Ändert sich der Datensatz eines Kontakts,
+legt das Telefon ihn beim nächsten Download neu an — und die Markierung ist weg.
+
+Genau das war die Ursache, als die Favoriten hier erstmals verschwanden: nicht die
+Einstellung `Remove Manually-edited Entries on Download` (die ist entlastet — ein Favorit
+überlebte zwei Syncs mit `Yes`), sondern ein Umbau des Konverters von `Cell` auf `Mobile`,
+der **jeden** Kontakt neu schrieb.
+
+Daraus die wichtigste Betriebsregel dieses Projekts:
+
+> **Das XML-Format nicht mehr ohne Not ändern.** Es ist gegen das Gerät verifiziert. Jede
+> Formatänderung schreibt alle Kontakte neu und kostet sämtliche Favoriten.
 
 ## Was das WP826 wirklich tut
 
@@ -178,8 +192,9 @@ Weitere am Gerät gemessene Fakten:
 - **`<Company>` wird angezeigt**, obwohl der WP820-Guide es in der Contact-Spec gar
   nicht führt (nur FirstName/LastName/Primary/Frequent/Ringtone/Phone/Group). Der
   Guide ist dort unvollständig, nicht der Code.
-- **`<Frequent>1</Frequent>` wird übernommen** — der Export zeigt es auf genau den
-  konfigurierten Favoriten.
+- **`<Frequent>1</Frequent>` wird gespeichert, aber nicht benutzt** — der Export zeigt
+  das Flag auf genau den konfigurierten Kontakten, die Favorite-Liste ignoriert es.
+  Speichern heißt hier nicht auswerten.
 
 ## Rufnummern-Verteilung
 

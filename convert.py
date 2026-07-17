@@ -124,7 +124,6 @@ class Contact:
     company: str = ""
     nick: str = ""
     phones: list[Phone] = field(default_factory=list)
-    favorite: bool = False
     account: str = ""  # Herkunfts-Account, nur für den Report
     source: str = ""   # Dateiname, nur für den Report
 
@@ -244,42 +243,6 @@ def load_contacts(source_base, accounts) -> list[Contact]:
     return out
 
 
-def mark_favorites(contacts: list[Contact], favorites) -> list[str]:
-    """Setzt `favorite` auf den passenden Kontakten. Rückgabe: Einträge ohne Treffer.
-
-    Warum überhaupt nötig: iCloud kennt kein Favoriten-Flag — Apples Favoriten leben
-    in der Telefon-App und kommen nicht über die Kontakte-API. Und weil das Telefon
-    seine Einträge bei jedem Download aus dem XML neu baut, geht eine am Gerät
-    gesetzte Markierung verloren. Sie muss also aus dem XML kommen.
-
-    Ein Eintrag darf ein **Name** (wie am Telefon angezeigt, inkl. Spitzname) oder
-    eine **Rufnummer** sein. Nummern werden über `clean_number` verglichen, damit
-    "+49 170 1234567" und "+491701234567" derselbe Eintrag sind. Namen
-    case-insensitiv.
-
-    Die Rückgabe ist der Grund, warum das nicht still passiert: ein Tippfehler in der
-    Liste würde sonst einfach nie greifen, und man sucht den Fehler am Telefon.
-    """
-    wanted = [f.strip() for f in (favorites or []) if f.strip()]
-    if not wanted:
-        return []
-    by_name = {c.display.casefold(): c for c in contacts}
-    by_number: dict[str, Contact] = {}
-    for c in contacts:
-        for p in c.phones:
-            by_number.setdefault(p.number, c)
-
-    unmatched: list[str] = []
-    for entry in wanted:
-        hit = by_name.get(entry.casefold()) or by_number.get(clean_number(entry))
-        if hit is None:
-            unmatched.append(entry)
-            LOGGER.warning("Favorit ohne Treffer: %r", entry)
-        else:
-            hit.favorite = True
-    return unmatched
-
-
 def dedupe(contacts: list[Contact]) -> list[Contact]:
     """Entfernt Kontakte, die sich über Accounts hinweg doppeln.
 
@@ -390,15 +353,6 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
                     first = first[:MAX_NAME - len(suffix)] + suffix
             _sub(el, "FirstName", first)
             _sub(el, "LastName", last)
-            if c.favorite:
-                # Spec: "0: Default, 1: Mark this contact as frequent/favorite".
-                # Muss mitgeschickt werden — das Telefon baut seine Einträge bei
-                # jedem Download aus dem XML neu, eine am Gerät gesetzte Markierung
-                # fiele sonst auf 0 zurück.
-                #
-                # Nur beim ERSTEN Eintrag: ein Folge-Eintrag ("Name (2)") ist eine
-                # Notlösung für überzählige Nummern, kein zweiter Favorit.
-                _sub(el, "Frequent", "1" if n == 1 else "0")
             if c.company:
                 _sub(el, "Company", c.company[:MAX_NAME])
             for slot in SLOTS:  # feste Reihenfolge -> stabile Ausgabe
@@ -447,7 +401,7 @@ def _is_unknown_label(label: str) -> bool:
     return norm not in LABEL_TO_SLOT and not FAX_LABEL_RE.search(norm)
 
 
-def build_report(contacts: list[Contact], unmatched_favorites=()) -> str:
+def build_report(contacts: list[Contact]) -> str:
     """Menschenlesbarer Bericht: was kostet das Drei-Slot-Limit, was ist unbekannt?
 
     Absichtlich nicht ins Repo schreiben — enthält echte Namen und Rufnummern.
@@ -516,16 +470,6 @@ def build_report(contacts: list[Contact], unmatched_favorites=()) -> str:
         lines.append("Kontakte mit Spitzname: keine")
     lines.append("")
 
-    favs = [c for c in contacts if c.favorite]
-    lines.append(f"Favoriten (<Frequent>1</Frequent>): {len(favs)}")
-    for c in favs:
-        lines.append(f"  {c.display} ({c.account})")
-    if unmatched_favorites:
-        # Wichtiger als die Treffer: ein Tippfehler in der Liste würde sonst nie
-        # auffallen — man sucht den Fehler am Telefon statt in der Config.
-        lines.append(f"  ACHTUNG, ohne Treffer: {', '.join(unmatched_favorites)}")
-    lines.append("")
-
     # Namen, die das Gerät kappt (18 pro Feld, am Export gemessen). Nicht automatisch
     # aufteilen — iCloud bleibt Quelle der Wahrheit, gekürzt wird dort.
     cut = long_names(contacts)
@@ -570,10 +514,9 @@ def main(argv=None):
     if not contacts:
         print(f"Keine Kontakte gefunden unter {source_base} für {accounts}", file=sys.stderr)
         return 1
-    unmatched = mark_favorites(contacts, cfg.get("favorites"))
 
     if args.report:
-        print(build_report(contacts, unmatched))
+        print(build_report(contacts))
         return 0
 
     xml = to_grandstream_xml(contacts)

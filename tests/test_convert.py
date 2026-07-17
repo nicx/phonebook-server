@@ -83,6 +83,21 @@ def test_contact_without_label():
     check(c.phones[0].label == "(ohne Label)", "fehlendes Label wird für den Report benannt")
 
 
+def test_no_frequent_element():
+    """<Frequent> wird bewusst NICHT geschrieben. Am Gerät belegt: es erzeugt keine
+    Favoriten (7 Kontakte trugen das Flag, in der Favorite-Liste stand nur der von
+    Hand markierte) und es bewahrt sie auch nicht (nach dem Entfernen des Flags
+    überlebte die Markierung 1:1). Das Feld stammt aus dem WP820-Guide, dessen
+    Contact-Tabelle auf den GXV3275 verweist — ein Erbstück.
+
+    Favoriten sind eine Geräte-Funktion: Contacts -> Options -> Add to Favorite.
+    Dieser Test hält fest, dass wir das nicht nochmal übers XML versuchen."""
+    raw = {"contactId": "Q1", "firstName": "Mama",
+           "phones": [{"field": "+49 30 2312599", "label": "MOBILE"}]}
+    xml = convert.to_grandstream_xml([convert.contact_from_icloud(raw)])
+    check(b"Frequent" not in xml, "kein <Frequent> im XML — das Feld ist wirkungslos")
+
+
 def test_three_slots_only():
     """Am Gerät verifiziert: das WP826 hat NUR Work/Home/Mobile. Fax und Other aus
     dem WP820-Guide (der auf den GXV3275 verweist) faltet die Firmware auf Work —
@@ -271,87 +286,6 @@ def test_without_nickname_nothing_changes():
     check(c.name_fields() == ("Jens", "Ohne"), "ohne Spitzname bleibt der echte Name")
 
 
-# ---------------------------------------------------------------- Favoriten ---
-
-def _fav_contact(cid, first, number, nick=""):
-    raw = {"contactId": cid, "firstName": first,
-           "phones": [{"field": number, "label": "MOBILE"}]}
-    if nick:
-        raw["nickName"] = nick
-    return convert.contact_from_icloud(raw)
-
-
-def test_favorite_by_name():
-    cs = [_fav_contact("F1", "Evi", "+49 30 2312560", nick="Oma Evi"),
-          _fav_contact("F2", "Jens", "+49 30 2312561")]
-    unmatched = convert.mark_favorites(cs, ["Oma Evi"])
-    check(unmatched == [], "der Name trifft")
-    check(cs[0].favorite and not cs[1].favorite, "nur der Gemeinte ist Favorit")
-    check("Oma Evi" in convert.build_report(cs), "Report nennt ihn")
-
-
-def test_favorite_matches_display_name_not_real_name():
-    """Gematcht wird gegen das, was am Telefon steht — sonst müsste man wissen, wie
-    jemand im Datensatz heißt, statt wie er angezeigt wird."""
-    cs = [_fav_contact("F3", "Evi", "+49 30 2312562", nick="Oma Evi")]
-    check(convert.mark_favorites(cs, ["Evi"]) == ["Evi"],
-          "der echte Vorname trifft NICHT, wenn ein Spitzname angezeigt wird")
-    check(not cs[0].favorite, "und markiert folglich nichts")
-
-
-def test_favorite_by_number_ignores_formatting():
-    cs = [_fav_contact("F4", "Jens", "+49 (30) 2312563")]
-    check(convert.mark_favorites(cs, ["+49 30 2312563"]) == [],
-          "Nummer trifft trotz anderer Schreibweise")
-    check(cs[0].favorite, "und markiert")
-
-
-def test_favorite_is_case_insensitive():
-    cs = [_fav_contact("F5", "Evi", "+49 30 2312564", nick="Oma Evi")]
-    convert.mark_favorites(cs, ["oma evi"])
-    check(cs[0].favorite, "Groß-/Kleinschreibung ist egal")
-
-
-def test_unmatched_favorite_is_reported():
-    """Ein Tippfehler in der Liste würde sonst nie auffallen — man sucht den Fehler
-    am Telefon statt in der Konfiguration."""
-    cs = [_fav_contact("F6", "Jens", "+49 30 2312565")]
-    unmatched = convert.mark_favorites(cs, ["Gibt Es Nicht", "+49 30 9999999"])
-    check(unmatched == ["Gibt Es Nicht", "+49 30 9999999"], "beide Fehltreffer werden gemeldet")
-    report = convert.build_report(cs, unmatched)
-    check("ACHTUNG" in report and "Gibt Es Nicht" in report, "und stehen im Report")
-
-
-def test_favorite_writes_frequent():
-    cs = [_fav_contact("F7", "Evi", "+49 30 2312566", nick="Oma Evi"),
-          _fav_contact("F8", "Jens", "+49 30 2312567")]
-    convert.mark_favorites(cs, ["Oma Evi"])
-    els = contacts_in(xml_of(cs))
-    check(els[0].find("Frequent").text == "1", "Favorit bekommt <Frequent>1</Frequent>")
-    check(els[1].find("Frequent") is None, "Nicht-Favorit bekommt gar kein Frequent")
-
-
-def test_favorite_only_on_first_entry():
-    """Ein Folge-Eintrag ("Name (2)") ist eine Notlösung für überzählige Nummern,
-    kein zweiter Favorit."""
-    raw = {"contactId": "F9", "firstName": "Viel", "nickName": "Opa Viel",
-           "phones": [{"field": f"+49 30 23125{70 + i}", "label": "MOBILE"} for i in range(6)]}
-    c = convert.contact_from_icloud(raw)
-    convert.mark_favorites([c], ["Opa Viel"])
-    els = contacts_in(xml_of([c]))
-    check(len(els) == 2, "sechs Nummern -> zwei Einträge")
-    check(els[0].find("Frequent").text == "1", "erster Eintrag ist der Favorit")
-    check(els[1].find("Frequent").text == "0", "der Folge-Eintrag ausdrücklich nicht")
-
-
-def test_empty_favorites_list():
-    cs = [_fav_contact("FA", "Jens", "+49 30 2312568")]
-    check(convert.mark_favorites(cs, []) == [], "leere Liste -> nichts zu tun")
-    check(convert.mark_favorites(cs, None) == [], "None -> nichts zu tun")
-    check(convert.mark_favorites(cs, ["  ", ""]) == [], "leere Einträge werden ignoriert")
-    check(not cs[0].favorite, "und nichts wird markiert")
-
-
 def test_company_only_contact():
     """Firmenkontakt ohne Personennamen: der Name muss trotzdem sichtbar sein."""
     raw = {"contactId": "C4", "companyName": "Muster GmbH", "isCompany": True,
@@ -514,6 +448,7 @@ if __name__ == "__main__":
     test_clean_number()
     test_slot_mapping()
     test_contact_without_label()
+    test_no_frequent_element()
     test_three_slots_only()
     test_three_numbers_fill_the_entry()
     test_fax_label_goes_to_work()
@@ -528,14 +463,6 @@ if __name__ == "__main__":
     test_nickname_replaces_display_name()
     test_nickname_key_is_camelcase()
     test_without_nickname_nothing_changes()
-    test_favorite_by_name()
-    test_favorite_matches_display_name_not_real_name()
-    test_favorite_by_number_ignores_formatting()
-    test_favorite_is_case_insensitive()
-    test_unmatched_favorite_is_reported()
-    test_favorite_writes_frequent()
-    test_favorite_only_on_first_entry()
-    test_empty_favorites_list()
     test_company_only_contact()
     test_contact_without_phone_is_dropped()
     test_hostile_characters_are_escaped()
