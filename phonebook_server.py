@@ -226,10 +226,12 @@ class PhonebookBuilder:
             self.contact_count = len(contacts)
             self.entry_count = entries
             self.last_error = None
-            self._report_long_names(contacts)
             LOGGER.info("Telefonbuch gebaut: %d Kontakte -> %d Einträge, %d Bytes",
                         len(contacts), entries, len(xml))
-            self._report(True)
+            # Kein zweites _report(True): das läuft schon oben, sobald die Quelle
+            # nachweislich lesbar ist. Hier wäre es tot — die Bedingung steht dann
+            # längst auf "gesund" und _on_healthy kehrt sofort zurück.
+            self._report_long_names(contacts)
             return True
 
     def read_cache(self) -> bytes | None:
