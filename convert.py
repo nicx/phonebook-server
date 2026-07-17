@@ -13,6 +13,10 @@ eine Schwesterfunktion ist und kein Umbau:
     load_contacts(...)      -> list[Contact]     # laden + normalisieren, formatneutral
     to_grandstream_xml(...) -> bytes             # rendern, Grandstream-spezifisch
 
+Formatquelle ist der **WP820 XML Phonebook Guide** (nächstes Modell zum WP826), nicht
+das FusionPBX-Template: letzteres gilt für die GXP16xx-Serie und weicht in drei
+Punkten ab, die auf einem WP-Gerät wehtun — siehe SLOTS, ACCOUNT_INDEX und MAX_NAME.
+
 CLI:
     python3 convert.py --report            # was ginge beim Mapping verloren?
     python3 convert.py -o phonebook.xml    # XML schreiben
@@ -31,36 +35,60 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
-# Grandstream kennt je Kontakt genau diese drei Rufnummern-Slots.
-SLOTS = ("Work", "Home", "Cell")
+# Erlaubte Werte des type-Attributs, wörtlich aus dem WP820 XML Phonebook Guide
+# ("Table 8: <Phone> Element" -> "type: Work/Home/Mobile/Fax/Other"). Die
+# Reihenfolge ist zugleich die Ausgabereihenfolge im XML.
+#
+# NICHT "Cell": das steht im FusionPBX-Template, gilt aber für die GXP16xx-Serie.
+# Die WP-Reihe kennt "Mobile" — bestätigt durch den Kontakt-Editor des WP8x6
+# (Admin Guide: Work/Home/Mobile) und die Online-Contacts-Schlüssel
+# (extensionHome/extensionMobile).
+SLOTS = ("Work", "Home", "Mobile", "Fax", "Other")
 
-# Feldlängen laut Grandstream XML Phonebook Guide. Längere Werte werden hart
-# abgeschnitten — das Telefon würde sie sonst selbst kappen oder den Eintrag
-# verwerfen.
-MAX_NAME = 24
-MAX_NUMBER = 24
+# Ziel-Slots für Nummern, deren Wunsch-Slot belegt ist. "Other" zuerst, weil das
+# die ehrlichste Aussage über eine Zweitnummer ist. **Fax fehlt hier bewusst**:
+# eine Sprachnummer als Fax auszuweisen wäre aktiv irreführend — man würde sie
+# nicht anrufen. Der Fax-Slot bleibt echten Faxnummern vorbehalten.
+SPILL_SLOTS = ("Other", "Work", "Home", "Mobile")
+
+# Welches SIP-Konto wählt die Nummer. Spec: "From 0 to 5 for account 1 to
+# account 6" — 0 ist also das ERSTE Konto, nicht "keins". Das FusionPBX-Template
+# schreibt 1 und würde damit auf ein zweites Konto zeigen, das es hier nicht gibt.
+ACCOUNT_INDEX = "0"
+
+# Reine Vernunftgrenzen gegen kaputte Daten, KEINE Spec-Vorgabe: die WP820-Spec
+# nennt für Namen nur "String" und für Nummern "Number", ohne Länge. Die 24 aus
+# dem FusionPBX-Template ist GXP-Folklore und würde echte Einträge verstümmeln
+# ("Robert-Bosch-Gymnasium Sekretariat"). Längster echter Wert: Name 34, Nummer 15.
+MAX_NAME = 64
+MAX_NUMBER = 32
 
 # Label -> Slot. Die Labels kommen ungefiltert aus iCloud und sind KEIN
 # geschlossenes Vokabular: neben den Apple-Vorgaben stehen dort freie
 # Nutzer-Eingaben ("Mobil", "WhatsApp", "Homeoffice"), und `label` darf ganz
 # fehlen. Alles Unbekannte fällt auf DEFAULT_SLOT zurück (siehe _slot_for).
 LABEL_TO_SLOT = {
-    "MOBILE": "Cell",
-    "IPHONE": "Cell",
-    "MOBIL": "Cell",
-    "CELL": "Cell",
-    "WHATSAPP": "Cell",
+    "MOBILE": "Mobile",
+    "IPHONE": "Mobile",
+    "MOBIL": "Mobile",
+    "CELL": "Mobile",
+    "WHATSAPP": "Mobile",
     "HOME": "Home",
     "HOMEOFFICE": "Home",
     "WORK": "Work",
     "BUSINESS": "Work",
     "MAIN": "Work",
+    "OTHER": "Other",
+    "PAGER": "Other",
 }
-DEFAULT_SLOT = "Cell"
+# Ohne Label: die klare Mehrheit aller Nummern ist mobil, und Mobile ist der
+# Slot, den das Gerät garantiert anzeigt.
+DEFAULT_SLOT = "Mobile"
 
-# Labels, die kein Telefon-Slot sind: Faxe kann das WP826 nicht anrufen, und sie
-# würden einen der drei Slots belegen. Werden verworfen und im Report gemeldet.
-DROP_LABEL_RE = re.compile(r"FAX|PAGER", re.IGNORECASE)
+# Fax-Varianten ("WORK FAX", "HOME FAX", "Fax privat", …) auf den Fax-Slot. Sie
+# werden NICHT verworfen: "Fax" ist ein gültiger type-Wert, kostet keinen
+# Sprach-Slot und bleibt so wenigstens nachschlagbar.
+FAX_LABEL_RE = re.compile(r"FAX", re.IGNORECASE)
 
 
 @dataclass
@@ -109,16 +137,20 @@ def clean_number(raw: str) -> str:
 def _slot_for(label: str | None) -> str:
     if not label:
         # 51 von 359 Nummern haben gar kein Label (im Account Max sogar 35 von 41).
-        # Die Mehrheit aller Nummern ist mobil -> Cell ist die beste Wette.
         return DEFAULT_SLOT
-    return LABEL_TO_SLOT.get(label.strip().upper(), DEFAULT_SLOT)
+    norm = label.strip().upper()
+    if norm in LABEL_TO_SLOT:
+        return LABEL_TO_SLOT[norm]
+    if FAX_LABEL_RE.search(norm):  # "WORK FAX", "HOME FAX", …
+        return "Fax"
+    return DEFAULT_SLOT
 
 
 def contact_from_icloud(raw: dict) -> Contact:
     """Baut einen Contact aus einem rohen iCloud-Kontakt-Dict.
 
     Defensiv gegen fehlende Schlüssel: außer `contactId` ist praktisch jedes Feld
-    optional. Faxe/Pager werden hier schon aussortiert.
+    optional. Verworfen wird nichts — nur Einträge ohne wählbare Ziffern.
     """
     c = Contact(
         first=(raw.get("firstName") or "").strip(),
@@ -132,8 +164,6 @@ def contact_from_icloud(raw: dict) -> Contact:
         if not number:
             continue
         label = (ph.get("label") or "").strip()
-        if DROP_LABEL_RE.search(label):
-            continue
         c.phones.append(Phone(number=number, slot=_slot_for(label), label=label or "(ohne Label)"))
     return c
 
@@ -206,17 +236,17 @@ class Entry:
 def plan_entries(contact: Contact) -> list[Entry]:
     """Verteilt ALLE Rufnummern verlustfrei auf so viele Einträge wie nötig.
 
-    Das Telefon kennt je Kontakt nur Work/Home/Cell. Statt Überzähliges wegzuwerfen,
-    in zwei Stufen:
+    Je Eintrag kennt das Telefon jeden Slot nur einmal (Work/Home/Mobile/Fax/Other).
+    Statt Überzähliges wegzuwerfen, in Stufen:
 
     1. Jede Nummer in ihren Wunsch-Slot, solange der frei ist.
-    2. Wer verdrängt wurde, rutscht in irgendeinen freien Slot desselben Eintrags.
-       Der Typ am Telefon ist dann ungenau (ein zweites Handy steht z. B. als
-       "Work") — aber die Nummer ist wählbar, und das ist der Zweck eines
-       Telefonbuchs. Ein Label ist Kosmetik, eine fehlende Nummer nicht.
-    3. Bleibt dann noch etwas übrig (>3 Nummern), beginnt ein weiterer Eintrag.
+    2. Wer verdrängt wurde, rutscht in einen freien Slot aus SPILL_SLOTS — "Other"
+       zuerst. Der Typ am Telefon ist dann ungenau, aber die Nummer ist wählbar,
+       und das ist der Zweck eines Telefonbuchs. Ein Label ist Kosmetik, eine
+       fehlende Nummer nicht.
+    3. Bleibt dann noch etwas übrig, beginnt ein weiterer Eintrag.
 
-    Terminiert immer: die erste Nummer findet stets einen Slot (taken ist leer),
+    Terminiert immer: die erste Nummer findet stets ihren Slot (e.slots ist leer),
     pro Runde wird also mindestens eine Nummer untergebracht.
     """
     remaining = list(contact.phones)
@@ -231,7 +261,7 @@ def plan_entries(contact: Contact) -> list[Entry]:
                 e.slots[p.slot] = p.number
         leftover: list[Phone] = []
         for p in displaced:
-            free = next((s for s in SLOTS if s not in e.slots), None)
+            free = next((s for s in SPILL_SLOTS if s not in e.slots), None)
             if free is None:
                 leftover.append(p)
             else:
@@ -293,7 +323,7 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
                     continue
                 ph = ET.SubElement(el, "Phone", {"type": slot})
                 _sub(ph, "phonenumber", entry.slots[slot][:MAX_NUMBER])
-                _sub(ph, "accountindex", "1")
+                _sub(ph, "accountindex", ACCOUNT_INDEX)
 
     ET.indent(root, space="  ")
     # Deklaration selbst schreiben: ElementTree würde sie mit einfachen Anführungs-
@@ -306,13 +336,22 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
 
 # ---------------------------------------------------------------------- Report ---
 
+def _is_unknown_label(label: str) -> bool:
+    """True, wenn `label` nur über den DEFAULT_SLOT-Fallback landet.
+
+    Muss dieselben Wege kennen wie `_slot_for` — sonst meldet der Report Labels als
+    "unbekannt", die sehr wohl sauber gemappt werden (etwa "HOME FAX" -> Fax).
+    """
+    norm = label.strip().upper()
+    return norm not in LABEL_TO_SLOT and not FAX_LABEL_RE.search(norm)
+
+
 def build_report(contacts: list[Contact]) -> str:
     """Menschenlesbarer Bericht: was kostet das Drei-Slot-Limit, was ist unbekannt?
 
     Absichtlich nicht ins Repo schreiben — enthält echte Namen und Rufnummern.
     """
     lines: list[str] = []
-    known = {k.upper() for k in LABEL_TO_SLOT}
     label_counts: dict[str, int] = {}
     unknown: dict[str, int] = {}
     spilled: list[tuple[Contact, Phone, str]] = []
@@ -329,8 +368,7 @@ def build_report(contacts: list[Contact]) -> str:
                 spilled.append((c, phone, actual))
         for p in c.phones:
             label_counts[p.label] = label_counts.get(p.label, 0) + 1
-            norm = p.label.strip().upper()
-            if p.label != "(ohne Label)" and norm not in known:
+            if p.label != "(ohne Label)" and _is_unknown_label(p.label):
                 unknown[p.label] = unknown.get(p.label, 0) + 1
 
     n_phones = sum(len(c.phones) for c in contacts)

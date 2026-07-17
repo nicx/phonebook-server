@@ -60,14 +60,14 @@ def test_clean_number():
 
 def test_slot_mapping():
     cases = {
-        "MOBILE": "Cell", "IPHONE": "Cell", "Mobil": "Cell", "WhatsApp": "Cell",
+        "MOBILE": "Mobile", "IPHONE": "Mobile", "Mobil": "Mobile", "WhatsApp": "Mobile",
         "HOME": "Home", "Homeoffice": "Home", "WORK": "Work", "MAIN": "Work",
     }
     for label, want in cases.items():
         check(convert._slot_for(label) == want, f"Label {label!r} -> {want}")
-    check(convert._slot_for(None) == "Cell", "fehlendes Label -> Cell (Default)")
-    check(convert._slot_for("") == "Cell", "leeres Label -> Cell")
-    check(convert._slot_for("Voodoo") == "Cell", "unbekanntes Label -> Cell statt Verlust")
+    check(convert._slot_for(None) == "Mobile", "fehlendes Label -> Mobile (Default)")
+    check(convert._slot_for("") == "Mobile", "leeres Label -> Mobile")
+    check(convert._slot_for("Voodoo") == "Mobile", "unbekanntes Label -> Mobile statt Verlust")
 
 
 # ------------------------------------------------------------------ Mapping ---
@@ -79,34 +79,53 @@ def test_contact_without_label():
            "phones": [{"field": "+49 30 2312505"}]}
     c = convert.contact_from_icloud(raw)
     check(len(c.phones) == 1, "Nummer ohne Label wird übernommen")
-    check(c.phones[0].slot == "Cell", "Nummer ohne Label landet in Cell")
+    check(c.phones[0].slot == "Mobile", "Nummer ohne Label landet in Mobile")
     check(c.phones[0].label == "(ohne Label)", "fehlendes Label wird für den Report benannt")
 
 
-def test_contact_with_four_numbers():
-    """Vier Nummern, drei Slots: Fax fliegt raus, der Rest passt genau."""
+def test_all_five_slots():
+    """Die WP820-Spec erlaubt Work/Home/Mobile/Fax/Other. Eine Faxnummer belegt den
+    Fax-Slot und kostet damit KEINEN Sprach-Slot."""
     raw = {"contactId": "C2", "firstName": "Bodo", "lastName": "Muster",
            "phones": [
                {"field": "+49 30 2312506", "label": "WORK"},
                {"field": "+49 30 2312507", "label": "HOME"},
                {"field": "+49 30 2312508", "label": "MOBILE"},
                {"field": "+49 30 2312509", "label": "WORK FAX"},
+               {"field": "+49 30 2312519", "label": "OTHER"},
            ]}
     c = convert.contact_from_icloud(raw)
-    check(len(c.phones) == 3, "FAX wird schon beim Einlesen verworfen")
+    check(len(c.phones) == 5, "keine Nummer wird beim Einlesen verworfen — auch Fax nicht")
     entries = convert.plan_entries(c)
-    check(len(entries) == 1, "drei Nummern passen in einen Eintrag")
-    check(set(entries[0].slots) == {"Work", "Home", "Cell"}, "alle drei Slots belegt")
+    check(len(entries) == 1, "fünf Nummern passen in einen Eintrag")
     check(entries[0].spills == [], "nichts musste ausweichen")
 
     el = contacts_in(xml_of([c]))[0]
     check(phones_of(el) == {"Work": "+49302312506", "Home": "+49302312507",
-                            "Cell": "+49302312508"}, "XML enthält genau die drei Nummern")
+                            "Mobile": "+49302312508", "Fax": "+49302312509",
+                            "Other": "+49302312519"},
+          "alle fünf Typen stehen mit der richtigen Nummer im XML")
 
 
-def test_slot_collision_spills_into_free_slot():
-    """Zwei Handys: der Cell-Slot ist weg, aber Work/Home sind frei. Die zweite
-    Nummer darf nicht verloren gehen, nur weil ihr Wunsch-Slot belegt ist."""
+def test_fax_label_variants():
+    for label in ("WORK FAX", "HOME FAX", "Fax privat", "fax"):
+        check(convert._slot_for(label) == "Fax", f"Label {label!r} -> Fax")
+
+
+def test_accountindex_is_first_account():
+    """Spec: "From 0 to 5 for account 1 to account 6". 0 ist das ERSTE Konto.
+    Das FusionPBX-Template schreibt 1 und zeigt damit auf ein zweites Konto,
+    das es hier nicht gibt."""
+    raw = {"contactId": "C2b", "firstName": "Ida",
+           "phones": [{"field": "+49 30 2312520", "label": "MOBILE"}]}
+    el = contacts_in(xml_of([convert.contact_from_icloud(raw)]))[0]
+    check(el.find("Phone/accountindex").text == "0", "accountindex ist 0 = Konto 1")
+
+
+def test_slot_collision_spills_into_other():
+    """Zwei Handys: der Mobile-Slot ist weg. Die zweite Nummer darf nicht verloren
+    gehen, nur weil ihr Wunsch-Slot belegt ist — und "Other" ist die ehrlichste
+    Aussage über eine Zweitnummer."""
     raw = {"contactId": "C3", "firstName": "Cem", "lastName": "Probe",
            "phones": [
                {"field": "+49 30 2312510", "label": "MOBILE"},
@@ -115,10 +134,9 @@ def test_slot_collision_spills_into_free_slot():
     c = convert.contact_from_icloud(raw)
     entries = convert.plan_entries(c)
     check(len(entries) == 1, "kein Zusatzeintrag nötig, es ist ja Platz")
-    check(entries[0].slots["Cell"] == "+49302312510", "erste Nummer behält den Wunsch-Slot")
-    check("+49302312511" in entries[0].slots.values(), "zweite Nummer bleibt erhalten")
+    check(entries[0].slots["Mobile"] == "+49302312510", "erste Nummer behält den Wunsch-Slot")
+    check(entries[0].slots.get("Other") == "+49302312511", "zweite landet in Other, nicht in Work")
     check(len(entries[0].spills) == 1, "das Ausweichen wird vermerkt")
-    check(entries[0].spills[0][1] != "Cell", "sie steht in einem anderen Slot als gewünscht")
 
     report = convert.build_report([c])
     check("ungenauem Typ" in report and "+49302312511" in report,
@@ -126,20 +144,28 @@ def test_slot_collision_spills_into_free_slot():
     check("verlustfrei" in report, "Report bestätigt: nichts verloren")
 
 
-def test_more_than_three_numbers_creates_extra_entry():
-    """Vier wählbare Nummern passen nicht in drei Slots -> zweiter Eintrag."""
-    raw = {"contactId": "C3b", "firstName": "Dirk", "lastName": "Viel",
-           "phones": [
-               {"field": "+49 30 2312530", "label": "WORK"},
-               {"field": "+49 30 2312531", "label": "HOME"},
-               {"field": "+49 30 2312532", "label": "MOBILE"},
-               {"field": "+49 30 2312533", "label": "MOBILE"},
-           ]}
+def test_voice_number_never_spills_into_fax():
+    """Eine Sprachnummer als Fax auszuweisen wäre aktiv irreführend — man würde sie
+    nicht anrufen. Lieber ein Zusatzeintrag als ein falsches Fax."""
+    raw = {"contactId": "C3d", "firstName": "Frida",
+           "phones": [{"field": f"+49 30 23125{50 + i}", "label": "MOBILE"} for i in range(5)]}
     c = convert.contact_from_icloud(raw)
     entries = convert.plan_entries(c)
-    check(len(entries) == 2, "vier Nummern -> zwei Einträge")
+    for e in entries:
+        check("Fax" not in e.slots, "kein Sprachanschluss landet je im Fax-Slot")
     placed = [n for e in entries for n in e.slots.values()]
-    check(len(placed) == 4 and len(set(placed)) == 4, "alle vier Nummern landen im Plan, keine doppelt")
+    check(len(placed) == 5, "trotzdem gehen alle fünf Nummern mit")
+
+
+def test_more_numbers_than_slots_creates_extra_entry():
+    """Sechs wählbare Nummern passen nicht in die vier Spill-tauglichen Slots."""
+    raw = {"contactId": "C3b", "firstName": "Dirk", "lastName": "Viel",
+           "phones": [{"field": f"+49 30 23125{30 + i}", "label": "MOBILE"} for i in range(6)]}
+    c = convert.contact_from_icloud(raw)
+    entries = convert.plan_entries(c)
+    check(len(entries) == 2, "sechs gleichartige Nummern -> zwei Einträge")
+    placed = [n for e in entries for n in e.slots.values()]
+    check(len(placed) == 6 and len(set(placed)) == 6, "alle sechs im Plan, keine doppelt")
 
     els = contacts_in(xml_of([c]))
     check(len(els) == 2, "zwei Contact-Elemente im XML")
@@ -148,15 +174,27 @@ def test_more_than_three_numbers_creates_extra_entry():
 
 
 def test_extra_entry_suffix_survives_truncation():
-    """Bei langem Namen darf das Suffix nicht selbst der 24-Zeichen-Grenze zum Opfer fallen."""
-    raw = {"contactId": "C3c", "firstName": "Emil", "lastName": "L" * 40,
-           "phones": [{"field": f"+49 30 23125{40 + i}", "label": "MOBILE"} for i in range(4)]}
+    """Bei absurd langem Namen darf das Suffix nicht selbst der Längengrenze zum
+    Opfer fallen."""
+    raw = {"contactId": "C3c", "firstName": "Emil", "lastName": "L" * 200,
+           "phones": [{"field": f"+49 30 23125{40 + i}", "label": "MOBILE"} for i in range(6)]}
     c = convert.contact_from_icloud(raw)
     els = contacts_in(xml_of([c]))
-    check(len(els) == 2, "vier gleichartige Nummern -> zwei Einträge")
+    check(len(els) == 2, "sechs gleichartige Nummern -> zwei Einträge")
     last2 = els[1].find("LastName").text
     check(last2.endswith(" (2)"), "Suffix ist trotz Überlänge vorhanden")
-    check(len(last2) <= convert.MAX_NAME, "Feld bleibt in der Längengrenze")
+    check(len(last2) <= convert.MAX_NAME, "Feld bleibt in der Vernunftgrenze")
+
+
+def test_real_names_are_not_truncated():
+    """Die 24 aus dem FusionPBX-Template ist GXP-Folklore; die WP-Spec nennt für
+    Namen nur "String". Echte Einträge wie "Robert-Bosch-Gymnasium Sekretariat"
+    dürfen nicht verstümmelt werden."""
+    name = "Robert-Bosch-Gymnasium Sekretariat"
+    raw = {"contactId": "C3e", "firstName": name,
+           "phones": [{"field": "+49 30 2312560", "label": "WORK"}]}
+    el = contacts_in(xml_of([convert.contact_from_icloud(raw)]))[0]
+    check(el.find("FirstName").text == name, "34-Zeichen-Name kommt vollständig durch")
 
 
 def test_company_only_contact():
@@ -191,16 +229,17 @@ def test_hostile_characters_are_escaped():
     check(b"<script>" not in xml, "'<' steht escaped im Byte-Stream, nicht roh")
 
 
-def test_field_truncation():
-    raw = {"contactId": "C7", "firstName": "F" * 40, "lastName": "L" * 40,
-           "companyName": "C" * 40,
-           "phones": [{"field": "+4930231251" + "4" * 30, "label": "WORK"}]}
+def test_field_sanity_limits():
+    """Vernunftgrenze gegen kaputte Daten — greift bei echten Namen nie."""
+    raw = {"contactId": "C7", "firstName": "F" * 200, "lastName": "L" * 200,
+           "companyName": "C" * 200,
+           "phones": [{"field": "+4930231251" + "4" * 60, "label": "WORK"}]}
     c = convert.contact_from_icloud(raw)
     el = contacts_in(xml_of([c]))[0]
-    check(len(el.find("FirstName").text) == convert.MAX_NAME, "FirstName auf 24 gekürzt")
-    check(len(el.find("LastName").text) == convert.MAX_NAME, "LastName auf 24 gekürzt")
-    check(len(el.find("Company").text) == convert.MAX_NAME, "Company auf 24 gekürzt")
-    check(len(phones_of(el)["Work"]) == convert.MAX_NUMBER, "Nummer auf 24 gekürzt")
+    check(len(el.find("FirstName").text) == convert.MAX_NAME, "absurder FirstName wird gekappt")
+    check(len(el.find("LastName").text) == convert.MAX_NAME, "absurder LastName wird gekappt")
+    check(len(el.find("Company").text) == convert.MAX_NAME, "absurde Company wird gekappt")
+    check(len(phones_of(el)["Work"]) == convert.MAX_NUMBER, "absurde Nummer wird gekappt")
 
 
 # -------------------------------------------------------------------- Struktur ---
@@ -216,7 +255,7 @@ def test_xml_shape():
     check(root.find("version").text == "1", "version = 1")
     ph = contacts_in(root)[0].find("Phone")
     check(ph.get("type") == "Home", "Phone hat das type-Attribut")
-    check(ph.find("accountindex").text == "1", "accountindex ist gesetzt")
+    check(ph.find("accountindex").text == "0", "accountindex ist gesetzt")
 
 
 def test_slot_order_is_stable():
@@ -230,10 +269,27 @@ def test_slot_order_is_stable():
            ]}
     c = convert.contact_from_icloud(raw)
     el = contacts_in(xml_of([c]))[0]
-    check([p.get("type") for p in el.findall("Phone")] == ["Work", "Home", "Cell"],
+    check([p.get("type") for p in el.findall("Phone")] == ["Work", "Home", "Mobile"],
           "Slots immer in SLOTS-Reihenfolge, unabhängig von der Eingabe")
     check(convert.to_grandstream_xml([c]) == convert.to_grandstream_xml([c]),
           "gleiche Eingabe -> byte-gleiche Ausgabe")
+
+
+def test_only_spec_types_are_emitted():
+    """Ein type-Wert außerhalb der Spec (etwa das GXP-"Cell") könnte das Gerät die
+    Nummer verschlucken lassen — bei Handys wäre das die Mehrheit der Daten."""
+    allowed = set(convert.SLOTS)
+    check(allowed == {"Work", "Home", "Mobile", "Fax", "Other"},
+          "SLOTS entspricht exakt der WP820-Spec")
+    check("Cell" not in allowed, "kein GXP-'Cell' — das kennt die WP-Reihe nicht")
+    raws = [
+        {"contactId": "T1", "firstName": "A", "phones": [{"field": "+49 30 2312570", "label": lbl}]}
+        for lbl in ("MOBILE", "IPHONE", "HOME", "WORK", "WORK FAX", "OTHER", "Voodoo", None)
+    ]
+    cs = [convert.contact_from_icloud(r) for r in raws]
+    root = xml_of(cs)
+    got = {p.get("type") for p in root.iter("Phone")}
+    check(got <= allowed, f"alle erzeugten Typen sind spec-konform: {sorted(got)}")
 
 
 # --------------------------------------------------------------------- Laden ---
@@ -283,6 +339,20 @@ def test_dedupe_across_accounts():
     check(len(convert.dedupe([a, c])) == 2, "Namensgleichheit allein ist kein Duplikat")
 
 
+def test_report_unknown_detection_matches_mapping():
+    """Der Report muss dieselben Mapping-Wege kennen wie _slot_for. Sonst meldet er
+    Labels als "unbekannt", die er zwei Zeilen weiter oben korrekt zuordnet."""
+    check(not convert._is_unknown_label("HOME FAX"), "'HOME FAX' ist nicht unbekannt — es geht auf Fax")
+    check(not convert._is_unknown_label("MOBILE"), "'MOBILE' ist nicht unbekannt")
+    check(convert._is_unknown_label("Voodoo"), "'Voodoo' ist tatsächlich unbekannt")
+
+    raw = {"contactId": "R1", "firstName": "Rita",
+           "phones": [{"field": "+49 30 2312580", "label": "HOME FAX"}]}
+    report = convert.build_report([convert.contact_from_icloud(raw)])
+    check("Unbekannte Labels: keine" in report,
+          "ein sauber gemapptes Fax-Label taucht nicht in der Unbekannt-Liste auf")
+
+
 def test_report_runs_on_empty():
     check("0" in convert.build_report([]), "Report kippt nicht bei null Kontakten")
 
@@ -291,18 +361,24 @@ if __name__ == "__main__":
     test_clean_number()
     test_slot_mapping()
     test_contact_without_label()
-    test_contact_with_four_numbers()
-    test_slot_collision_spills_into_free_slot()
-    test_more_than_three_numbers_creates_extra_entry()
+    test_all_five_slots()
+    test_fax_label_variants()
+    test_accountindex_is_first_account()
+    test_slot_collision_spills_into_other()
+    test_voice_number_never_spills_into_fax()
+    test_more_numbers_than_slots_creates_extra_entry()
     test_extra_entry_suffix_survives_truncation()
+    test_real_names_are_not_truncated()
     test_company_only_contact()
     test_contact_without_phone_is_dropped()
     test_hostile_characters_are_escaped()
-    test_field_truncation()
+    test_field_sanity_limits()
     test_xml_shape()
     test_slot_order_is_stable()
+    test_only_spec_types_are_emitted()
     test_load_contacts()
     test_dedupe_across_accounts()
+    test_report_unknown_detection_matches_mapping()
     test_report_runs_on_empty()
 
     print(f"\n{len(PASS)} ok, {len(FAIL)} fehlgeschlagen")

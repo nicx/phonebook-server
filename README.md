@@ -94,20 +94,35 @@ curl -u wp826:… http://192.168.2.1:8081/phonebook.xml | xmllint --format -
 **Aus dem LAN testen, nicht nur über `127.0.0.1`** — ein py2app-Bundle kann sich beim
 Loopback anders verhalten als im Netz (bei MailRelay ist genau das aufgefallen).
 
-## Das Drei-Slot-Problem
+## Rufnummern-Typen
 
-Das WP826 kennt je Kontakt nur **Work/Home/Cell**. iCloud kennt beliebig viele Nummern
-mit freien Labels. Der Konverter arbeitet deshalb in Stufen und ist dabei **verlustfrei**:
+Maßgeblich ist der **WP820 XML Phonebook Guide** (nächstes Modell zum WP826), *nicht*
+das FusionPBX-Template — das gilt für die GXP16xx-Serie und weicht in drei Punkten ab,
+die auf einem WP-Gerät wehtun:
 
-1. Jede Nummer in ihren Wunsch-Slot (`MOBILE`/`IPHONE`/`Mobil`/`WhatsApp` → Cell,
-   `HOME`/`Homeoffice` → Home, `WORK`/`MAIN` → Work, **kein Label** → Cell).
-2. Wer verdrängt wird, rutscht in einen freien Slot desselben Eintrags. Der Typ am
-   Telefon ist dann ungenau — aber die Nummer ist wählbar. Ein Label ist Kosmetik,
-   eine fehlende Nummer nicht.
-3. Bleibt dann noch etwas übrig (>3 Nummern), entsteht ein zweiter Eintrag „Name (2)".
+| | WP820-Spec | FusionPBX (GXP16xx) |
+|---|---|---|
+| `type` | `Work` / `Home` / `Mobile` / `Fax` / `Other` | `Cell` statt `Mobile` |
+| `accountindex` | `0`–`5` für Konto 1–6 → **`0`** | `1` (= Konto 2) |
+| Feldlänge | nur „String", keine Grenze | auf 24 gekürzt |
 
-Fax- und Pager-Nummern fliegen raus: das Telefon kann sie nicht anrufen, und sie würden
-einen Slot belegen.
+`Cell` kennt die WP-Reihe nicht — bestätigt auch durch den Kontakt-Editor des WP8x6
+(Work/Home/Mobile) und die Online-Contacts-Schlüssel `extensionHome`/`extensionMobile`.
+
+iCloud kennt beliebig viele Nummern mit freien Labels. Der Konverter ist trotzdem
+**verlustfrei**:
+
+1. Jede Nummer in ihren Wunsch-Slot: `MOBILE`/`IPHONE`/`Mobil`/`WhatsApp` → Mobile,
+   `HOME`/`Homeoffice` → Home, `WORK`/`MAIN` → Work, alles mit „FAX" → Fax,
+   `OTHER`/`PAGER` → Other, **kein Label** → Mobile.
+2. Wer verdrängt wird, rutscht in einen freien Slot — **Other zuerst**, weil das die
+   ehrlichste Aussage über eine Zweitnummer ist. Der Typ ist dann ungenau, aber die
+   Nummer wählbar. Ein Label ist Kosmetik, eine fehlende Nummer nicht.
+   **In den Fax-Slot rutscht nie eine Sprachnummer** — die würde man nicht anrufen.
+3. Passt dann noch immer nicht alles, entsteht ein zweiter Eintrag „Name (2)".
+
+Faxnummern werden **nicht** verworfen: `Fax` ist ein gültiger Typ und kostet keinen
+Sprach-Slot.
 
 Was das bei den echten Daten kostet:
 
@@ -118,6 +133,10 @@ make report
 Der Bericht zeigt Label-Verteilung, unbekannte Labels, Nummern mit ungenauem Typ und
 Zusatzeinträge — und ob unterm Strich etwas verloren geht. **Enthält echte Namen und
 Rufnummern**, deshalb nur auf den Bildschirm, nie ins Repo.
+
+Nicht spec-belegt und daher unter Vorbehalt: `<Company>` taucht im WP820-XML-Guide
+nirgends auf, wohl aber im Kontakt-Editor des WP8x6. Wird mitgeschickt; sollte das
+Gerät es ignorieren, ist das folgenlos.
 
 ## Robustheit
 
