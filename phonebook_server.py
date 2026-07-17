@@ -600,10 +600,16 @@ class PhonebookApp(rumps.App):
         # behalten, da ist ein fertiger Vorschlag hilfreicher als ein leeres Feld.
         initial["password"] = "" if has_pw else secrets.token_urlsafe(12)
         self._notices = []
-        if run_settings_window("Phonebook Server – Einstellungen", sections,
-                               initial, self._commit_settings):
-            for note in self._notices:
-                rumps.alert(APP_TITLE, note)
+
+        def _done(saved):
+            # Läuft erst nach dem Schließen — das Fenster ist NICHT modal, der Aufruf
+            # unten kehrt sofort zurück. Hinweise deshalb hierher, nicht dorthin.
+            if saved:
+                for note in self._notices:
+                    rumps.alert(APP_TITLE, note)
+
+        run_settings_window("Phonebook Server – Einstellungen", sections,
+                            initial, self._commit_settings, _done)
 
     def _commit_settings(self, raw):
         """Validiert + übernimmt. Rückgabe: Fehlerliste (leer = schließen)."""

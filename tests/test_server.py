@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -452,6 +453,30 @@ def _raw(**over):
     return base
 
 
+def test_settings_window_is_not_app_modal():
+    """Das Einstellungsfenster darf NIEMALS app-modal sein.
+
+    Eine reine Menüleisten-App (LSUIElement, kein Dock-Icon) sperrt sich mit
+    runModalForWindow_ komplett aus, sobald das Fenster den Fokus verliert oder
+    außerhalb des sichtbaren Bereichs landet: AppKit graut während des modalen Loops
+    alle Menüs aus, und ohne Dock-Icon gibt es keinen Weg zurück — die App ist dann
+    nur noch per kill zu beenden.
+
+    Genau das ist passiert: der Builder wurde am 2026-07-17 um 10:57 aus mailrelay
+    kopiert, mailrelay wurde um 11:32 gefixt (fc4ce6d), die Kopie behielt den Bug.
+    mailrelay warnt im Docstring ausdrücklich davor — ein Kommentar hat den Rückfall
+    nicht verhindert, dieser Test tut es.
+    """
+    src = (Path(__file__).resolve().parent.parent / "ui_appkit.py").read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    # Im Docstring darf es stehen (als Warnung), im Code nicht.
+    ohne_docstrings = re.sub(r'""".*?"""', "", code, flags=re.S)
+    check("runModalForWindow_" not in ohne_docstrings,
+          "kein runModalForWindow_ im Code — das sperrt die Menüleisten-App aus")
+    check("windowWillClose_" in src, "der rote Schließen-Knopf wird abgefangen")
+    check("setDelegate_" in src, "das Fenster hat einen Delegate")
+
+
 def test_parse_settings_ignores_login_item():
     """Der Autostart-Zustand IST die LaunchAgent-plist. Eine Kopie in settings.json
     könnte auseinanderlaufen — plist von Hand gelöscht, Haken zeigt weiter "an"."""
@@ -520,6 +545,7 @@ def test_parse_settings_collects_all_errors():
 
 if __name__ == "__main__":
     try:
+        test_settings_window_is_not_app_modal()
         test_parse_settings_ignores_login_item()
         test_autostart_args_none_outside_bundle()
         test_parse_settings_ok()
