@@ -383,7 +383,10 @@ class PhonebookApp(rumps.App):
             self.status_item,
             self.count_item,
             None,
-            rumps.MenuItem("Jetzt neu bauen", callback=self.rebuild),
+            # Nicht "neu bauen": in diesem Projekt heißt "bauen" sonst immer, die
+            # .app zu kompilieren (make app). Der Punkt erzeugt aber nur die
+            # phonebook.xml neu.
+            rumps.MenuItem("Telefonbuch jetzt aktualisieren", callback=self.rebuild),
             None,
             rumps.MenuItem("Einstellungen…", callback=self.open_settings),
             rumps.MenuItem("Test-E-Mail senden", callback=self.send_test_mail),
@@ -502,12 +505,24 @@ class PhonebookApp(rumps.App):
 
     # -- Aktionen ------------------------------------------------------------
     def rebuild(self, _):
+        """Erzeugt die phonebook.xml sofort neu — ungeachtet der mtime-Prüfung.
+
+        Im Normalbetrieb überflüssig: bei jedem Poll wird ohnehin geprüft, und
+        Einstellungsänderungen bauen selbst neu. Der Punkt ist für Ungeduld und zum
+        Nachsehen, ob die Favoriten greifen, ohne aufs Telefon zu warten.
+        """
         self.builder.refresh(self.cfg, force=True)
         if self.builder.last_error:
-            rumps.notification(APP_TITLE, "Bauen fehlgeschlagen", self.builder.last_error, sound=False)
-        else:
-            rumps.notification(APP_TITLE, "Telefonbuch gebaut",
-                               f"{self.builder.contact_count} Kontakte", sound=False)
+            rumps.notification(APP_TITLE, "Telefonbuch nicht aktualisiert",
+                               self.builder.last_error, sound=False)
+            return
+        # Die Favoriten gehören in die Rückmeldung: sie sind meist der Grund, warum
+        # man den Punkt überhaupt drückt.
+        msg = (f"{self.builder.contact_count} Kontakte, "
+               f"{self.builder.favorite_count} Favoriten")
+        if self.builder.unmatched_favorites:
+            msg += f" — ohne Treffer: {', '.join(self.builder.unmatched_favorites)}"
+        rumps.notification(APP_TITLE, "Telefonbuch aktualisiert", msg, sound=False)
 
     def restart(self):
         if self.httpd is not None:
