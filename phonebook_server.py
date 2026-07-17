@@ -29,6 +29,7 @@ import rumps
 import convert
 import notify
 import settings as cfgmod
+from ui_appkit import run_settings_window
 
 __version__ = "1.0.0"
 
@@ -280,6 +281,65 @@ def serve(builder, cfg, password) -> ThreadingHTTPServer:
     return httpd
 
 
+# ------------------------------------------------------------ Validierung ---
+
+def parse_settings(raw: dict) -> tuple[dict | None, list[str]]:
+    """Validiert die Roh-Eingaben des Einstellungsfensters.
+
+    Reine Logik, AppKit-frei und damit unit-testbar (Muster:
+    ``mailrelay.parse_relay_settings``). Rückgabe ``(values, errors)``; ``values``
+    enthält nur cfg-Felder — kein Passwort, das geht seinen eigenen Weg in den
+    Schlüsselbund.
+    """
+    errors: list[str] = []
+
+    def _port(key, label):
+        v = str(raw.get(key, "")).strip()
+        if v.isdigit() and 1 <= int(v) <= 65535:
+            return int(v)
+        errors.append(f"{label}: Zahl 1–65535")
+        return None
+
+    port = _port("port", "Port")
+    smtp_port = _port("smtp_port", "Relay-Port")
+
+    accounts = [a.strip() for a in str(raw.get("accounts", "")).split(",") if a.strip()]
+    if not accounts:
+        errors.append("Accounts: mindestens einer")
+
+    source_base = str(raw.get("source_base", "")).strip()
+    if not source_base:
+        errors.append("Basisordner: darf nicht leer sein")
+
+    bind = str(raw.get("bind", "")).strip()
+    if not bind:
+        errors.append("Adresse: darf nicht leer sein")
+
+    user = str(raw.get("basic_auth_user", "")).strip()
+    if not user:
+        # Ohne Benutzer gäbe es keine Basic Auth — und das Telefonbuch läge offen
+        # im LAN. Lieber gar nicht speichern.
+        errors.append("Benutzer: darf nicht leer sein")
+
+    if raw.get("notify_enabled") and not str(raw.get("notify_to", "")).strip():
+        errors.append("Empfänger: nötig, wenn Fehler-E-Mail aktiv ist")
+
+    if errors:
+        return None, errors
+    return {
+        "accounts": accounts,
+        "source_base": source_base,
+        "bind": bind,
+        "port": port,
+        "basic_auth_user": user,
+        "notify_enabled": bool(raw.get("notify_enabled")),
+        "notify_to": str(raw.get("notify_to", "")).strip(),
+        "notify_from": str(raw.get("notify_from", "")).strip(),
+        "smtp_host": str(raw.get("smtp_host", "")).strip() or "localhost",
+        "smtp_port": smtp_port,
+    }, []
+
+
 # ---------------------------------------------------------------- Menü-App ---
 
 class PhonebookApp(rumps.App):
@@ -290,9 +350,12 @@ class PhonebookApp(rumps.App):
         cfgmod.save_settings(self.cfg)  # Defaults sichtbar machen
         # settings_provider statt fester Werte: Änderungen an settings.json wirken
         # beim nächsten Reload, ohne die Instanz neu zu bauen.
+        # settings_provider statt fester Werte: liest self.cfg bei jedem Emit, und
+        # self.cfg wird von _reload_if_changed aktuell gehalten.
         self.notifier = notify.NotifierState(lambda: self.cfg)
         self.builder = PhonebookBuilder(notifier=self.notifier)
         self.httpd = None
+        self._cfg_mtime = None
 
         self._report_stale_crash()
 
@@ -303,11 +366,11 @@ class PhonebookApp(rumps.App):
             self.count_item,
             None,
             rumps.MenuItem("Jetzt neu bauen", callback=self.rebuild),
-            rumps.MenuItem("Passwort setzen…", callback=self.set_password),
             None,
+            rumps.MenuItem("Einstellungen…", callback=self.open_settings),
             rumps.MenuItem("Test-E-Mail senden", callback=self.send_test_mail),
             rumps.MenuItem("Log öffnen…", callback=self.open_log),
-            rumps.MenuItem("Einstellungen öffnen…", callback=self.open_settings),
+            rumps.MenuItem("Konfigurationsdatei öffnen…", callback=self.open_config_file),
             None,
             rumps.MenuItem("Beenden", callback=self.quit_app),
         ]
@@ -370,7 +433,10 @@ class PhonebookApp(rumps.App):
         self.log.info("Lauscht auf %s:%s%s", self.cfg["bind"], self.cfg["port"], URL_PATH)
 
     def tick(self, _):
+        self._reload_if_changed()
         if self.httpd is None:
+            if not self.status_item.title.startswith("Status: "):
+                self.status_item.title = "Status: gestoppt"
             return
         if self.builder.last_error:
             self.status_item.title = f"Status: {self.builder.last_error}"
@@ -378,6 +444,38 @@ class PhonebookApp(rumps.App):
             self.status_item.title = f"Status: läuft ({self.cfg['bind']}:{self.cfg['port']})"
         self.count_item.title = (
             f"Kontakte: {self.builder.contact_count} ({self.builder.entry_count} Einträge)")
+
+    def _reload_if_changed(self):
+        """Lädt settings.json neu, wenn sie sich geändert hat.
+
+        Ohne das wäre der `settings_provider` des Notifiers ein leeres Versprechen:
+        er liest `self.cfg`, und wenn die nur einmal beim Start geladen wird, wirkt
+        keine Änderung ohne Neustart. Der Watch deckt beide Wege ab — das
+        Einstellungsfenster UND ein Handedit der Datei.
+        """
+        try:
+            mtime = cfgmod.SETTINGS_PATH.stat().st_mtime_ns
+        except OSError:
+            return
+        if mtime == self._cfg_mtime:
+            return
+        self._cfg_mtime = mtime
+        old = dict(self.cfg)
+        self.cfg = cfgmod.load_settings()
+        if self.cfg == old:
+            return  # nur angefasst, inhaltlich gleich
+        self.log.info("Einstellungen neu geladen")
+        self._apply_settings(old)
+
+    def _apply_settings(self, old):
+        """Übernimmt geänderte Einstellungen. Neustart NUR bei Listener-relevanten
+        Feldern — Quelle und Mail-Felder greifen sofort (Muster mailrelay)."""
+        if any(old.get(k) != self.cfg.get(k) for k in ("bind", "port", "basic_auth_user")):
+            self.log.info("Listener-relevante Änderung -> Server neu starten")
+            self.restart()
+        else:
+            # Quelle könnte sich geändert haben (accounts/source_base) -> neu bauen.
+            self.builder.refresh(self.cfg, force=True)
 
     # -- Aktionen ------------------------------------------------------------
     def rebuild(self, _):
@@ -387,25 +485,6 @@ class PhonebookApp(rumps.App):
         else:
             rumps.notification(APP_TITLE, "Telefonbuch gebaut",
                                f"{self.builder.contact_count} Kontakte", sound=False)
-
-    def set_password(self, _):
-        user = self.cfg["basic_auth_user"]
-        suggestion = secrets.token_urlsafe(12)
-        w = rumps.Window(
-            title=f"{APP_TITLE} – Basic-Auth-Passwort",
-            message=(f"Passwort für Benutzer „{user}“.\n"
-                     "Dasselbe im WP826 unter Phone Book → Phone Book Management eintragen.\n"
-                     "Der Vorschlag ist bereits eingetragen."),
-            default_text=suggestion,
-            ok="Speichern", cancel="Abbrechen", dimensions=(320, 24))
-        r = w.run()
-        if not r.clicked or not r.text.strip():
-            return
-        if cfgmod.set_password(user, r.text.strip()):
-            rumps.notification(APP_TITLE, "Passwort gespeichert", "Server wird neu gestartet.", sound=False)
-            self.restart()
-        else:
-            rumps.alert(APP_TITLE, "Passwort konnte nicht im Schlüsselbund gespeichert werden.")
 
     def restart(self):
         if self.httpd is not None:
@@ -418,9 +497,78 @@ class PhonebookApp(rumps.App):
         cfgmod.LOG_PATH.touch(exist_ok=True)
         subprocess.run(["open", str(cfgmod.LOG_PATH)])
 
-    def open_settings(self, _):
+    def open_config_file(self, _):
         cfgmod.save_settings(self.cfg)
         subprocess.run(["open", str(cfgmod.SETTINGS_PATH)])
+
+    def open_settings(self, _):
+        """Natives Einstellungsfenster — alle Felder auf einen Blick."""
+        has_pw = bool(cfgmod.get_password(self.cfg["basic_auth_user"]))
+        sections = [
+            ("Quelle", [
+                ("Accounts", "text", "accounts"),
+                ("Basisordner", "text", "source_base"),
+            ], "Accounts kommagetrennt, Reihenfolge = Priorität beim Entdoppeln.\n"
+               "Basisordner ist der iCloudSync-Spiegel; darunter wird "
+               "<Account>/Contacts/ gelesen."),
+            ("Server", [
+                ("Adresse", "text", "bind"),
+                ("Port", "int", "port"),
+                ("Benutzer", "text", "basic_auth_user"),
+                ("Passwort", "secret", "password"),
+            ], "0.0.0.0 = im LAN erreichbar (das Telefon braucht das).\n"
+               + ("Noch kein Passwort gesetzt — der Vorschlag ist schon eingetragen.\n"
+                  if not has_pw else "Passwort leer lassen = unverändert.\n")
+               + "Es liegt im Schlüsselbund, nie in der Konfigurationsdatei. "
+                 "Dasselbe im WP826 unter Phone Book → Phone Book Management eintragen."),
+            ("Fehler-E-Mail", [
+                ("Aktiv", "check", "notify_enabled"),
+                ("Empfänger", "text", "notify_to"),
+                ("Absender", "text", "notify_from"),
+                ("Relay-Host", "text", "smtp_host"),
+                ("Relay-Port", "int", "smtp_port"),
+            ], "Versand über das lokale MailRelay (kein Auth/TLS auf diesem Hop).\n"
+               "Absender leer = Empfänger. Gemailt wird nur bei einem Zustands-"
+               "wechsel, nicht bei jedem Poll."),
+        ]
+        initial = dict(self.cfg)
+        initial["accounts"] = ", ".join(self.cfg.get("accounts") or [])
+        # Leer heißt "unverändert" — beim allerersten Mal gibt es aber nichts zu
+        # behalten, da ist ein fertiger Vorschlag hilfreicher als ein leeres Feld.
+        initial["password"] = "" if has_pw else secrets.token_urlsafe(12)
+        self._notices = []
+        if run_settings_window("Phonebook Server – Einstellungen", sections,
+                               initial, self._commit_settings):
+            for note in self._notices:
+                rumps.alert(APP_TITLE, note)
+
+    def _commit_settings(self, raw):
+        """Validiert + übernimmt. Rückgabe: Fehlerliste (leer = schließen)."""
+        values, errors = parse_settings(raw)
+        if errors:
+            return errors
+
+        old = dict(self.cfg)
+        self.cfg.update(values)
+        cfgmod.save_settings(self.cfg)
+        # save_settings hat die Datei angefasst -> Watch nachziehen, sonst würde
+        # _reload_if_changed gleich nochmal (überflüssig) neu laden und anwenden.
+        try:
+            self._cfg_mtime = cfgmod.SETTINGS_PATH.stat().st_mtime_ns
+        except OSError:
+            pass
+
+        pw = (raw.get("password") or "").strip()
+        if pw and not cfgmod.set_password(self.cfg["basic_auth_user"], pw):
+            self._notices.append("Passwort konnte nicht im Schlüsselbund gespeichert werden.")
+
+        # Ein neu gesetztes Passwort ist listener-relevant: der Server hält es in
+        # der Handler-Klasse, ein reines Neuladen der Config bekäme es nicht mit.
+        if pw:
+            self.restart()
+        else:
+            self._apply_settings(old)
+        return []
 
     def send_test_mail(self, _):
         """Prüft den kompletten Mailweg bis zum MailRelay — ohne auf einen echten

@@ -245,8 +245,180 @@ def test_http_serves_stale_cache_on_broken_source():
         s.close()
 
 
+# ----------------------------------------------------------- Live-Übernahme ---
+
+class _HeadlessApp(ps.PhonebookApp):
+    """Nur die Reload-Mechanik, ohne Menüleiste und ohne Server.
+
+    Umgeht bewusst ``PhonebookApp.__init__`` (das würde rumps hochfahren), nutzt
+    aber die **echten** ``_reload_if_changed``/``_apply_settings``. Neustarts werden
+    nur gezählt.
+    """
+
+    def __init__(self, cfg):
+        import logging
+        self.log = logging.getLogger("test")
+        cfgmod.save_settings(cfg)
+        self.cfg = cfgmod.load_settings()
+        self._cfg_mtime = cfgmod.SETTINGS_PATH.stat().st_mtime_ns
+        self.builder = ps.PhonebookBuilder()
+        self.httpd = None
+        self.restarts = 0
+
+    def restart(self):
+        self.restarts += 1
+
+
+def _edit(**changes):
+    cfg = cfgmod.load_settings()
+    cfg.update(changes)
+    time.sleep(0.01)  # mtime_ns muss sich messbar unterscheiden
+    cfgmod.save_settings(cfg)
+
+
+def test_reload_picks_up_source_change_without_restart():
+    """Der Bug, der das ausgelöst hat: self.cfg wurde nur beim Start geladen, der
+    settings_provider des Notifiers war damit ein leeres Versprechen."""
+    _reset_cache()
+    src = _TMP / f"live{time.monotonic_ns()}"
+    _write(src, "Familie", [_contact("A", "Ina", "+49 30 2312501")])
+    _write(src, "Timo", [_contact("B", "Rolf", "+49 30 2312502")])
+
+    a = _HeadlessApp({**cfgmod.DEFAULTS, "accounts": ["Familie"],
+                      "source_base": str(src), "port": 18100})
+    a.builder.refresh(a.cfg, force=True)
+    check(a.builder.contact_count == 1, "startet mit einem Account")
+
+    _edit(accounts=["Familie", "Timo"])
+    a._reload_if_changed()
+    check(a.cfg["accounts"] == ["Familie", "Timo"], "Änderung an der Datei wird übernommen")
+    check(a.builder.contact_count == 2, "und wirkt sofort — ohne Neustart neu gebaut")
+    check(a.restarts == 0, "eine Quellenänderung braucht keinen Neustart")
+
+
+def test_reload_restarts_only_for_listener_fields():
+    _reset_cache()
+    src = _TMP / f"live{time.monotonic_ns()}"
+    _write(src, "Familie", [_contact("A", "Ina", "+49 30 2312503")])
+    a = _HeadlessApp({**cfgmod.DEFAULTS, "accounts": ["Familie"],
+                      "source_base": str(src), "port": 18100})
+    a.builder.refresh(a.cfg, force=True)
+
+    _edit(notify_to="neu@example.org")
+    a._reload_if_changed()
+    check(a.cfg["notify_to"] == "neu@example.org", "Mail-Feld wird übernommen")
+    check(a.restarts == 0, "Mail-Felder greifen ohne Neustart")
+
+    for field, value in (("port", 18101), ("bind", "127.0.0.1"), ("basic_auth_user", "neu")):
+        before = a.restarts
+        _edit(**{field: value})
+        a._reload_if_changed()
+        check(a.restarts == before + 1, f"{field} ist listener-relevant -> genau ein Neustart")
+
+
+def test_reload_ignores_touch_without_change():
+    """Sonst würde jeder Speichervorgang einen überflüssigen Rebuild auslösen."""
+    _reset_cache()
+    src = _TMP / f"live{time.monotonic_ns()}"
+    _write(src, "Familie", [_contact("A", "Ina", "+49 30 2312504")])
+    a = _HeadlessApp({**cfgmod.DEFAULTS, "accounts": ["Familie"],
+                      "source_base": str(src), "port": 18100})
+    a.builder.refresh(a.cfg, force=True)
+
+    time.sleep(0.01)
+    cfgmod.save_settings(cfgmod.load_settings())  # angefasst, inhaltlich gleich
+    a._reload_if_changed()
+    check(a.restarts == 0, "gleicher Inhalt -> kein Neustart")
+
+
+def test_reload_survives_broken_file():
+    """settings.json ist handeditierbar — ein Tippfehler darf die App nicht kippen."""
+    _reset_cache()
+    src = _TMP / f"live{time.monotonic_ns()}"
+    _write(src, "Familie", [_contact("A", "Ina", "+49 30 2312505")])
+    a = _HeadlessApp({**cfgmod.DEFAULTS, "accounts": ["Familie"],
+                      "source_base": str(src), "port": 18100})
+    time.sleep(0.01)
+    cfgmod.SETTINGS_PATH.write_text("{kein json", encoding="utf-8")
+    try:
+        a._reload_if_changed()
+        check(True, "kaputte settings.json wirft nicht durch")
+    except Exception:
+        check(False, "kaputte settings.json wirft nicht durch")
+    check(a.cfg["accounts"] == ["Familie"], "load_settings fällt auf die Defaults zurück")
+
+
+# -------------------------------------------------------------- Einstellungen ---
+
+def _raw(**over):
+    base = {"accounts": "Familie", "source_base": "/tmp/x", "bind": "0.0.0.0",
+            "port": "8081", "basic_auth_user": "wp826", "password": "",
+            "notify_enabled": False, "notify_to": "", "notify_from": "",
+            "smtp_host": "localhost", "smtp_port": "2525"}
+    base.update(over)
+    return base
+
+
+def test_parse_settings_ok():
+    values, errors = ps.parse_settings(_raw(accounts=" Familie , Timo "))
+    check(errors == [], "gültige Eingaben ergeben keine Fehler")
+    check(values["accounts"] == ["Familie", "Timo"], "Accounts werden getrennt und getrimmt")
+    check(values["port"] == 8081 and values["smtp_port"] == 2525, "Ports werden zu Zahlen")
+    check("password" not in values, "das Passwort geht NICHT in die Konfigurationsdatei")
+
+
+def test_parse_settings_ports():
+    for bad in ("0", "65536", "abc", "", "-1"):
+        _, errors = ps.parse_settings(_raw(port=bad))
+        check(errors != [], f"Port {bad!r} wird abgelehnt")
+    values, errors = ps.parse_settings(_raw(port="65535"))
+    check(errors == [] and values["port"] == 65535, "65535 ist gültig")
+
+
+def test_parse_settings_required_fields():
+    for field in ("accounts", "source_base", "bind", "basic_auth_user"):
+        _, errors = ps.parse_settings(_raw(**{field: "  "}))
+        check(errors != [], f"leeres Feld {field!r} wird abgelehnt")
+
+
+def test_parse_settings_empty_user_is_rejected():
+    """Ohne Benutzer gäbe es keine Basic Auth — das Telefonbuch läge offen im LAN."""
+    _, errors = ps.parse_settings(_raw(basic_auth_user=""))
+    check(any("Benutzer" in e for e in errors), "leerer Benutzer wird namentlich gerügt")
+
+
+def test_parse_settings_notify_needs_recipient():
+    _, errors = ps.parse_settings(_raw(notify_enabled=True, notify_to=""))
+    check(errors != [], "Fehler-E-Mail aktiv ohne Empfänger -> Fehler")
+    values, errors = ps.parse_settings(_raw(notify_enabled=False, notify_to=""))
+    check(errors == [], "inaktiv ohne Empfänger ist in Ordnung")
+    check(values["notify_enabled"] is False, "der Schalter wird zu bool")
+
+
+def test_parse_settings_smtp_host_fallback():
+    values, _ = ps.parse_settings(_raw(smtp_host="  "))
+    check(values["smtp_host"] == "localhost",
+          "leerer Relay-Host fällt auf localhost zurück (nicht 127.0.0.1)")
+
+
+def test_parse_settings_collects_all_errors():
+    _, errors = ps.parse_settings(_raw(port="x", smtp_port="y", accounts=""))
+    check(len(errors) >= 3, "alle Fehler auf einmal, nicht einer nach dem anderen")
+
+
 if __name__ == "__main__":
     try:
+        test_parse_settings_ok()
+        test_parse_settings_ports()
+        test_parse_settings_required_fields()
+        test_parse_settings_empty_user_is_rejected()
+        test_parse_settings_notify_needs_recipient()
+        test_parse_settings_smtp_host_fallback()
+        test_parse_settings_collects_all_errors()
+        test_reload_picks_up_source_change_without_restart()
+        test_reload_restarts_only_for_listener_fields()
+        test_reload_ignores_touch_without_change()
+        test_reload_survives_broken_file()
         test_build_and_cache()
         test_no_rebuild_when_unchanged()
         test_deletion_is_detected()

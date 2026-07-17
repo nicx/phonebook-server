@@ -45,6 +45,14 @@ kopieren und laden (siehe Kommentar in der Datei).
 
 ## Konfiguration
 
+Menü → **„Einstellungen…"** öffnet ein natives Fenster mit allen Feldern auf einen
+Blick (Quelle, Server, Fehler-E-Mail) inklusive Passwort. Änderungen greifen
+**sofort** — nur `bind`, `port`, `basic_auth_user` und ein neues Passwort lösen einen
+gezielten Neustart des Listeners aus, alles andere wirkt im Laufen.
+
+Wer lieber die Datei editiert, kann das weiterhin: sie wird per mtime beobachtet und
+automatisch neu geladen, ein Neustart der App ist auch dafür nicht nötig.
+
 `~/Library/Application Support/phonebook-server/settings.json` (wird beim ersten Start
 mit Defaults angelegt):
 
@@ -69,9 +77,10 @@ mit Defaults angelegt):
   `contactId`: die ist accountlokal, dieselbe Person hat je Account eine andere ID.
 - `bind` — `0.0.0.0`, damit das WLAN-Telefon drankommt. Loopback wäre nutzlos.
 
-**Passwort** über das Menü → „Passwort setzen…". Es landet im Schlüsselbund
-(Service `phonebook-server`), nie in `settings.json`. Ohne Passwort startet der Server
-**nicht** — das Telefonbuch enthält die Kontakte der ganzen Familie.
+**Passwort** im Einstellungsfenster. Es landet im Schlüsselbund (Service
+`phonebook-server`), nie in `settings.json`. Leer lassen = unverändert; beim ersten
+Mal steht schon ein Vorschlag drin. Ohne Passwort startet der Server **nicht** — das
+Telefonbuch enthält die Kontakte der ganzen Familie.
 
 ## WP826 einrichten
 
