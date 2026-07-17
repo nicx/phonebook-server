@@ -122,7 +122,8 @@ iCloud kennt beliebig viele Nummern mit freien Labels. Der Konverter ist trotzde
 3. Passt dann noch immer nicht alles, entsteht ein zweiter Eintrag „Name (2)".
 
 Faxnummern werden **nicht** verworfen: `Fax` ist ein gültiger Typ und kostet keinen
-Sprach-Slot.
+Sprach-Slot. Am WP826 verifiziert — der Fax-Slot wird angezeigt, obwohl der
+Kontakt-Editor des Geräts ihn nicht anbietet.
 
 Was das bei den echten Daten kostet:
 
@@ -134,9 +135,10 @@ Der Bericht zeigt Label-Verteilung, unbekannte Labels, Nummern mit ungenauem Typ
 Zusatzeinträge — und ob unterm Strich etwas verloren geht. **Enthält echte Namen und
 Rufnummern**, deshalb nur auf den Bildschirm, nie ins Repo.
 
-Nicht spec-belegt und daher unter Vorbehalt: `<Company>` taucht im WP820-XML-Guide
-nirgends auf, wohl aber im Kontakt-Editor des WP8x6. Wird mitgeschickt; sollte das
-Gerät es ignorieren, ist das folgenlos.
+`<Company>` taucht im WP820-XML-Guide nirgends auf (die Contact-Spec kennt nur
+FirstName/LastName/Primary/Frequent/Ringtone/Phone/Group), wird vom WP826 aber
+ausgewertet und angezeigt — am Gerät verifiziert. Der Guide ist an dieser Stelle
+unvollständig, nicht der Code.
 
 ## Robustheit
 
