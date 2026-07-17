@@ -83,55 +83,55 @@ def test_contact_without_label():
     check(c.phones[0].label == "(ohne Label)", "fehlendes Label wird für den Report benannt")
 
 
-def test_all_five_slots():
-    """Die WP820-Spec erlaubt Work/Home/Mobile/Fax/Other. Eine Faxnummer belegt den
-    Fax-Slot und kostet damit KEINEN Sprach-Slot."""
+def test_three_slots_only():
+    """Am Gerät verifiziert: das WP826 hat NUR Work/Home/Mobile. Fax und Other aus
+    dem WP820-Guide (der auf den GXV3275 verweist) faltet die Firmware auf Work —
+    und verwirft still, wenn Work schon belegt ist. Deshalb dürfen sie nie raus."""
+    check(convert.SLOTS == ("Work", "Home", "Mobile"), "genau drei Slots")
+    for verboten in ("Fax", "Other", "Cell"):
+        check(verboten not in convert.SLOTS, f"{verboten!r} wird nie gesendet")
+
+
+def test_three_numbers_fill_the_entry():
     raw = {"contactId": "C2", "firstName": "Bodo", "lastName": "Muster",
            "phones": [
                {"field": "+49 30 2312506", "label": "WORK"},
                {"field": "+49 30 2312507", "label": "HOME"},
                {"field": "+49 30 2312508", "label": "MOBILE"},
-               {"field": "+49 30 2312509", "label": "WORK FAX"},
-               {"field": "+49 30 2312519", "label": "OTHER"},
            ]}
     c = convert.contact_from_icloud(raw)
-    check(len(c.phones) == 5, "keine Nummer wird beim Einlesen verworfen — auch Fax nicht")
     entries = convert.plan_entries(c)
-    check(len(entries) == 1, "fünf Nummern passen in einen Eintrag")
+    check(len(entries) == 1, "drei Nummern passen in einen Eintrag")
     check(entries[0].spills == [], "nichts musste ausweichen")
-
     el = contacts_in(xml_of([c]))[0]
     check(phones_of(el) == {"Work": "+49302312506", "Home": "+49302312507",
-                            "Mobile": "+49302312508", "Fax": "+49302312509",
-                            "Other": "+49302312519"},
-          "alle fünf Typen stehen mit der richtigen Nummer im XML")
+                            "Mobile": "+49302312508"}, "alle drei stehen im XML")
 
 
-def test_fax_label_variants():
+def test_fax_label_goes_to_work():
+    """Das Gerät hat keinen Fax-Slot und legt Faxnummern selbst auf Work. Also
+    gleich selbst dorthin — dann löst plan_entries die Kollision, statt dass das
+    Telefon still verwirft."""
     for label in ("WORK FAX", "HOME FAX", "Fax privat", "fax"):
-        check(convert._slot_for(label) == "Fax", f"Label {label!r} -> Fax")
+        check(convert._slot_for(label) == "Work", f"Label {label!r} -> Work")
+    check(convert._slot_for("OTHER") == "Work", "OTHER -> Work (kein eigener Slot)")
+    check(convert._slot_for("PAGER") == "Work", "PAGER -> Work")
 
 
-def test_report_flags_fax_as_invisible():
-    """Faxnummern stehen spec-konform im XML, das WP826 zeigt den Fax-Slot aber nicht
-    an. Sie unter "verlustfrei" mitzuzählen wäre eine Lüge — der Report muss sie
-    getrennt ausweisen."""
+def test_fax_collision_does_not_lose_the_number():
+    """Genau der Fall, an dem am echten Gerät zwei Nummern verschwanden: Work ist
+    belegt, die Faxnummer will auch dorthin. Das Telefon würde sie kommentarlos
+    wegwerfen — wir weichen aus."""
     raw = {"contactId": "F1", "firstName": "Gitta", "lastName": "Fax",
            "phones": [
-               {"field": "+49 30 2312590", "label": "HOME"},
-               {"field": "+49 30 2312591", "label": "HOME FAX"},
+               {"field": "+49 30 2312590", "label": "WORK"},
+               {"field": "+49 30 2312591", "label": "WORK FAX"},
            ]}
-    report = convert.build_report([convert.contact_from_icloud(raw)])
-    check("NICHT sichtbar" in report, "Report warnt, dass Fax am Gerät unsichtbar ist")
-    check("+49302312591" in report, "die betroffene Nummer wird benannt")
-    check("davon am WP826 sichtbar: 1" in report,
-          "die Sichtbarkeitszahl zählt das Fax nicht mit")
-
-    ohne = {"contactId": "F2", "firstName": "Hein",
-            "phones": [{"field": "+49 30 2312592", "label": "MOBILE"}]}
-    r2 = convert.build_report([convert.contact_from_icloud(ohne)])
-    check("Faxnummern: keine" in r2, "ohne Fax bleibt der Report ruhig")
-    check("unsichtbar" not in r2, "und warnt dann auch nicht")
+    c = convert.contact_from_icloud(raw)
+    entries = convert.plan_entries(c)
+    placed = [n for e in entries for n in e.slots.values()]
+    check(len(placed) == 2 and len(set(placed)) == 2, "beide Nummern bleiben erhalten")
+    check("verlustfrei" in convert.build_report([c]), "und der Report sagt das auch")
 
 
 def test_accountindex_is_first_account():
@@ -144,7 +144,7 @@ def test_accountindex_is_first_account():
     check(el.find("Phone/accountindex").text == "0", "accountindex ist 0 = Konto 1")
 
 
-def test_slot_collision_spills_into_other():
+def test_slot_collision_spills_into_free_slot():
     """Zwei Handys: der Mobile-Slot ist weg. Die zweite Nummer darf nicht verloren
     gehen, nur weil ihr Wunsch-Slot belegt ist — und "Other" ist die ehrlichste
     Aussage über eine Zweitnummer."""
@@ -157,7 +157,8 @@ def test_slot_collision_spills_into_other():
     entries = convert.plan_entries(c)
     check(len(entries) == 1, "kein Zusatzeintrag nötig, es ist ja Platz")
     check(entries[0].slots["Mobile"] == "+49302312510", "erste Nummer behält den Wunsch-Slot")
-    check(entries[0].slots.get("Other") == "+49302312511", "zweite landet in Other, nicht in Work")
+    check("+49302312511" in entries[0].slots.values(), "zweite bleibt erhalten")
+    check(set(entries[0].slots) <= set(convert.SLOTS), "und zwar in einem echten Slot")
     check(len(entries[0].spills) == 1, "das Ausweichen wird vermerkt")
 
     report = convert.build_report([c])
@@ -166,17 +167,17 @@ def test_slot_collision_spills_into_other():
     check("verlustfrei" in report, "Report bestätigt: nichts verloren")
 
 
-def test_voice_number_never_spills_into_fax():
-    """Eine Sprachnummer als Fax auszuweisen wäre aktiv irreführend — man würde sie
-    nicht anrufen. Lieber ein Zusatzeintrag als ein falsches Fax."""
+def test_only_real_slots_are_ever_used():
+    """Kein Eintrag darf je einen Slot benutzen, den das Gerät nicht hat — sonst
+    verwirft die Firmware bei Kollision still."""
     raw = {"contactId": "C3d", "firstName": "Frida",
            "phones": [{"field": f"+49 30 23125{50 + i}", "label": "MOBILE"} for i in range(5)]}
     c = convert.contact_from_icloud(raw)
     entries = convert.plan_entries(c)
     for e in entries:
-        check("Fax" not in e.slots, "kein Sprachanschluss landet je im Fax-Slot")
+        check(set(e.slots) <= set(convert.SLOTS), "nur echte Slots belegt")
     placed = [n for e in entries for n in e.slots.values()]
-    check(len(placed) == 5, "trotzdem gehen alle fünf Nummern mit")
+    check(len(placed) == 5, "und alle fünf Nummern gehen mit")
 
 
 def test_more_numbers_than_slots_creates_extra_entry():
@@ -208,15 +209,33 @@ def test_extra_entry_suffix_survives_truncation():
     check(len(last2) <= convert.MAX_NAME, "Feld bleibt in der Vernunftgrenze")
 
 
-def test_real_names_are_not_truncated():
-    """Die 24 aus dem FusionPBX-Template ist GXP-Folklore; die WP-Spec nennt für
-    Namen nur "String". Echte Einträge wie "Robert-Bosch-Gymnasium Sekretariat"
-    dürfen nicht verstümmelt werden."""
+def test_long_names_are_reported():
+    """Das WP826 kappt jedes Namensfeld bei 18 Zeichen (am Export gemessen). Wir
+    teilen NICHT automatisch auf Vor-/Nachname auf — Timos Entscheidung: iCloud
+    bleibt Quelle der Wahrheit. Aber melden muss der Report es."""
     name = "Robert-Bosch-Gymnasium Sekretariat"
     raw = {"contactId": "C3e", "firstName": name,
            "phones": [{"field": "+49 30 2312560", "label": "WORK"}]}
-    el = contacts_in(xml_of([convert.contact_from_icloud(raw)]))[0]
-    check(el.find("FirstName").text == name, "34-Zeichen-Name kommt vollständig durch")
+    c = convert.contact_from_icloud(raw)
+    report = convert.build_report([c])
+    check("kappt" in report and name in report, "der zu lange Name wird gemeldet")
+    check("Robert-Bosch-Gymna" in report, "mitsamt dem, was übrig bleibt")
+
+    kurz = {"contactId": "C3f", "firstName": "Kurt",
+            "phones": [{"field": "+49 30 2312561", "label": "WORK"}]}
+    r2 = convert.build_report([convert.contact_from_icloud(kurz)])
+    check("Namen zu lang fürs Display: keine" in r2, "kurze Namen lösen keine Meldung aus")
+
+
+def test_name_with_lastname_has_double_the_room():
+    """Die 18 gelten pro FELD. Wer einen Nachnamen hat, bekommt 2x18 — deshalb
+    meldet der Report nur Kontakte, deren Name ganz im Vornamen steht."""
+    raw = {"contactId": "C3g", "firstName": "Andrea (Mama Edith)",
+           "lastName": "Stolz-Lindemann",
+           "phones": [{"field": "+49 30 2312562", "label": "MOBILE"}]}
+    report = convert.build_report([convert.contact_from_icloud(raw)])
+    check("Namen zu lang fürs Display: keine" in report,
+          "mit Nachname reicht der Platz — keine Meldung")
 
 
 def test_nickname_replaces_display_name():
@@ -411,13 +430,11 @@ def test_slot_order_is_stable():
           "gleiche Eingabe -> byte-gleiche Ausgabe")
 
 
-def test_only_spec_types_are_emitted():
-    """Ein type-Wert außerhalb der Spec (etwa das GXP-"Cell") könnte das Gerät die
-    Nummer verschlucken lassen — bei Handys wäre das die Mehrheit der Daten."""
+def test_only_real_types_are_emitted():
+    """Am Gerät verifiziert: nur Work/Home/Mobile werden echt gespeichert. Fax und
+    Other faltet die Firmware auf Work — und verwirft still, wenn Work belegt ist."""
     allowed = set(convert.SLOTS)
-    check(allowed == {"Work", "Home", "Mobile", "Fax", "Other"},
-          "SLOTS entspricht exakt der WP820-Spec")
-    check("Cell" not in allowed, "kein GXP-'Cell' — das kennt die WP-Reihe nicht")
+    check(allowed == {"Work", "Home", "Mobile"}, "SLOTS ist, was das Gerät wirklich hat")
     raws = [
         {"contactId": "T1", "firstName": "A", "phones": [{"field": "+49 30 2312570", "label": lbl}]}
         for lbl in ("MOBILE", "IPHONE", "HOME", "WORK", "WORK FAX", "OTHER", "Voodoo", None)
@@ -497,15 +514,17 @@ if __name__ == "__main__":
     test_clean_number()
     test_slot_mapping()
     test_contact_without_label()
-    test_all_five_slots()
-    test_fax_label_variants()
-    test_report_flags_fax_as_invisible()
+    test_three_slots_only()
+    test_three_numbers_fill_the_entry()
+    test_fax_label_goes_to_work()
+    test_fax_collision_does_not_lose_the_number()
     test_accountindex_is_first_account()
-    test_slot_collision_spills_into_other()
-    test_voice_number_never_spills_into_fax()
+    test_slot_collision_spills_into_free_slot()
+    test_only_real_slots_are_ever_used()
     test_more_numbers_than_slots_creates_extra_entry()
     test_extra_entry_suffix_survives_truncation()
-    test_real_names_are_not_truncated()
+    test_long_names_are_reported()
+    test_name_with_lastname_has_double_the_room()
     test_nickname_replaces_display_name()
     test_nickname_key_is_camelcase()
     test_without_nickname_nothing_changes()
@@ -523,7 +542,7 @@ if __name__ == "__main__":
     test_field_sanity_limits()
     test_xml_shape()
     test_slot_order_is_stable()
-    test_only_spec_types_are_emitted()
+    test_only_real_types_are_emitted()
     test_load_contacts()
     test_dedupe_across_accounts()
     test_report_unknown_detection_matches_mapping()

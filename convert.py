@@ -35,32 +35,46 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
-# Erlaubte Werte des type-Attributs, wörtlich aus dem WP820 XML Phonebook Guide
-# ("Table 8: <Phone> Element" -> "type: Work/Home/Mobile/Fax/Other"). Die
-# Reihenfolge ist zugleich die Ausgabereihenfolge im XML.
+# Die einzigen Slots, die das WP826 wirklich hat. **Am Gerät verifiziert**, indem ein
+# Export seines eigenen Telefonbuchs gegen das gesendete XML gehalten wurde:
 #
-# NICHT "Cell": das steht im FusionPBX-Template, gilt aber für die GXP16xx-Serie.
-# Die WP-Reihe kennt "Mobile" — bestätigt durch den Kontakt-Editor des WP8x6
-# (Admin Guide: Work/Home/Mobile) und die Online-Contacts-Schlüssel
-# (extensionHome/extensionMobile).
-SLOTS = ("Work", "Home", "Mobile", "Fax", "Other")
+#   ich sende      Gerät speichert
+#   ------------   ------------------------------------------------------
+#   Mobile     ->  Cell        (akzeptiert, umbenannt)
+#   Home       ->  Home
+#   Work       ->  Work
+#   Fax        ->  Work        (kein eigener Slot!)
+#   Other      ->  Work        (kein eigener Slot!)  ... und wenn Work schon
+#                              belegt ist, wird die Nummer KOMMENTARLOS VERWORFEN
+#
+# Der WP820 XML Phonebook Guide nennt zwar "Work/Home/Mobile/Fax/Other", aber seine
+# Contact-Tabelle verweist auf den GXV3275 — er ist streckenweise aus der GXV-Doku
+# kopiert. Fax/Other sind dort Erbstücke; die WP-Firmware faltet sie auf Work.
+#
+# Konsequenz: **niemals Fax oder Other senden.** Sonst überlässt man die
+# Slot-Vergabe dem Gerät, und das verwirft bei Kollision still. Alle Verteilung
+# passiert hier, wo sie sichtbar ist. Real verloren gingen so zwei Nummern.
+SLOTS = ("Work", "Home", "Mobile")
 
-# Ziel-Slots für Nummern, deren Wunsch-Slot belegt ist. "Other" zuerst, weil das
-# die ehrlichste Aussage über eine Zweitnummer ist. **Fax fehlt hier bewusst**:
-# eine Sprachnummer als Fax auszuweisen wäre aktiv irreführend — man würde sie
-# nicht anrufen. Der Fax-Slot bleibt echten Faxnummern vorbehalten.
-SPILL_SLOTS = ("Other", "Work", "Home", "Mobile")
+# Ziel-Slots für Nummern, deren Wunsch-Slot belegt ist. Alle drei sind erlaubt —
+# das Label wird dann ungenau, aber die Nummer ist wählbar. Wer nirgends mehr
+# hinpasst, bekommt einen Folge-Eintrag statt zu verschwinden.
+SPILL_SLOTS = SLOTS
 
 # Welches SIP-Konto wählt die Nummer. Spec: "From 0 to 5 for account 1 to
 # account 6" — 0 ist also das ERSTE Konto, nicht "keins". Das FusionPBX-Template
 # schreibt 1 und würde damit auf ein zweites Konto zeigen, das es hier nicht gibt.
 ACCOUNT_INDEX = "0"
 
-# Reine Vernunftgrenzen gegen kaputte Daten, KEINE Spec-Vorgabe: die WP820-Spec
-# nennt für Namen nur "String" und für Nummern "Number", ohne Länge. Die 24 aus
-# dem FusionPBX-Template ist GXP-Folklore und würde echte Einträge verstümmeln
-# ("Robert-Bosch-Gymnasium Sekretariat"). Längster echter Wert: Name 34, Nummer 15.
-MAX_NAME = 64
+# 18 Zeichen — **am Gerät gemessen**, nicht geraten: im Export des WP826 ist kein
+# Namensfeld länger, "Robert-Bosch-Gymnasium Sekretariat" steht dort als
+# "Robert-Bosch-Gymna". Die Spec nennt gar keine Länge, das FusionPBX-Template 24.
+#
+# Wir kappen trotzdem selbst, statt es dem Gerät zu überlassen: nur so bleibt beim
+# Folge-Eintrag Platz für das " (2)"-Suffix reserviert. Sonst kappte das Gerät genau
+# das Suffix weg — und zwei Einträge hießen identisch.
+MAX_NAME = 18
+# Für Nummern ist keine Grenze bekannt; reine Vernunftgrenze (längste echte: 15).
 MAX_NUMBER = 32
 
 # Label -> Slot. Die Labels kommen ungefiltert aus iCloud und sind KEIN
@@ -78,22 +92,22 @@ LABEL_TO_SLOT = {
     "WORK": "Work",
     "BUSINESS": "Work",
     "MAIN": "Work",
-    "OTHER": "Other",
-    "PAGER": "Other",
+    # Kein eigener Slot am Gerät -> Work. Die Kollision löst plan_entries, nicht
+    # das Telefon (das würde still verwerfen).
+    "OTHER": "Work",
+    "PAGER": "Work",
 }
-# Ohne Label: die klare Mehrheit aller Nummern ist mobil, und Mobile ist der
-# Slot, den das Gerät garantiert anzeigt.
+# Ohne Label: die klare Mehrheit aller Nummern ist mobil.
 DEFAULT_SLOT = "Mobile"
 
-# Fax-Varianten ("WORK FAX", "HOME FAX", "Fax privat", …) auf den Fax-Slot. Sie
-# werden nicht verworfen: "Fax" ist ein gültiger type-Wert und kostet keinen
-# Sprach-Slot.
+# Fax-Varianten ("WORK FAX", "HOME FAX", "Fax privat", …). Das WP826 hat keinen
+# Fax-Slot — es legt sie auf Work. Also gleich selbst auf Work, damit die
+# Kollisionsauflösung greift statt der stillen Verwerfung des Geräts.
 #
-# ABER: das WP826 zeigt den Fax-Slot **nicht** an (am Gerät geprüft) — spec-konform
-# heißt hier nicht sichtbar. Deshalb weist build_report() Faxnummern gesondert aus,
-# statt sie unter "verlustfrei" zu verbuchen. Wer sie am Telefon braucht, pflegt sie
-# in iCloud als normale Nummer.
+# Die Nummer geht dabei nicht verloren, wird am Telefon aber als "Work" angezeigt.
+# Das ist die Realität des Geräts, nicht unsere Wahl.
 FAX_LABEL_RE = re.compile(r"FAX", re.IGNORECASE)
+FAX_SLOT = "Work"
 
 
 @dataclass
@@ -166,7 +180,7 @@ def _slot_for(label: str | None) -> str:
     if norm in LABEL_TO_SLOT:
         return LABEL_TO_SLOT[norm]
     if FAX_LABEL_RE.search(norm):  # "WORK FAX", "HOME FAX", …
-        return "Fax"
+        return FAX_SLOT
     return DEFAULT_SLOT
 
 
@@ -494,26 +508,28 @@ def build_report(contacts: list[Contact], unmatched_favorites=()) -> str:
         lines.append(f"  ACHTUNG, ohne Treffer: {', '.join(unmatched_favorites)}")
     lines.append("")
 
-    # Faxnummern gesondert: sie stehen spec-konform im XML, das WP826 zeigt den
-    # Fax-Slot aber NICHT an (am Gerät geprüft). Sie hier stillschweigend unter
-    # "verlustfrei" mitzuzählen wäre eine Lüge — am Telefon sind sie unsichtbar.
-    faxes = [(c, n) for c in contacts for e in plan_entries(c)
-             for s, n in e.slots.items() if s == "Fax"]
-    if faxes:
-        lines.append(f"Faxnummern: {len(faxes)} — im XML, am WP826 aber NICHT sichtbar")
-        for c, n in faxes:
-            lines.append(f"  {c.display} ({c.account}): {n}")
+    # Namen, die das Gerät kappt. Nicht wir kürzen zu knapp — das WP826 kann pro
+    # Feld nur 18 Zeichen (am Export gemessen). Betroffen sind nur Kontakte, deren
+    # Name ganz im Vornamen steht; mit Nachname sind es 2x18. Timos Entscheidung:
+    # nicht automatisch aufteilen, sondern melden — Kürzen passiert in iCloud.
+    cut = []
+    for c in contacts:
+        first, last = c.name_fields()
+        if not last and len(first) > MAX_NAME:
+            cut.append((c, first))
+    if cut:
+        lines.append(f"Namen, die das WP826 auf {MAX_NAME} Zeichen kappt: {len(cut)}")
+        for c, first in cut:
+            lines.append(f"  {first!r} ({len(first)}) -> {first[:MAX_NAME]!r}")
+        lines.append("  (in iCloud kürzen, wenn es stört — mit Nachname wären es 2x18)")
     else:
-        lines.append("Faxnummern: keine")
+        lines.append("Namen zu lang fürs Display: keine")
     lines.append("")
 
     # Die eigentliche Kernaussage: kommt am Telefon alles an?
     placed = sum(len(e.slots) for c in contacts for e in plan_entries(c))
-    visible = placed - len(faxes)
     lines.append(f"Rufnummern im XML: {placed} von {n_phones} "
                  + ("— verlustfrei" if placed == n_phones else "— ACHTUNG, Verlust!"))
-    lines.append(f"davon am WP826 sichtbar: {visible}"
-                 + (f" ({len(faxes)} Fax unsichtbar)" if faxes else ""))
 
     return "\n".join(lines)
 

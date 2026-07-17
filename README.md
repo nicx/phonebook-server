@@ -142,38 +142,60 @@ Bei einem Kontakt mit so vielen Nummern, dass ein Folge-Eintrag entsteht, ist nu
 **erste** Favorit: „Name (2)" ist eine Notlösung für überzählige Nummern, kein
 zweiter Favorit.
 
-## Rufnummern-Typen
+## Was das WP826 wirklich tut
 
-Maßgeblich ist der **WP820 XML Phonebook Guide** (nächstes Modell zum WP826), *nicht*
-das FusionPBX-Template — das gilt für die GXP16xx-Serie und weicht in drei Punkten ab,
-die auf einem WP-Gerät wehtun:
+Maßgeblich ist **nicht** die Doku, sondern das Gerät. Ermittelt, indem ein Export des
+eigenen Telefonbuchs (Web GUI → Phone Book → **„Download XML Phonebook"**) gegen das
+gesendete XML gehalten wurde. Das ist die verlässlichste Referenz überhaupt — und sie
+widerlegt beide Papierquellen:
 
-| | WP820-Spec | FusionPBX (GXP16xx) |
-|---|---|---|
-| `type` | `Work` / `Home` / `Mobile` / `Fax` / `Other` | `Cell` statt `Mobile` |
-| `accountindex` | `0`–`5` für Konto 1–6 → **`0`** | `1` (= Konto 2) |
-| Feldlänge | nur „String", keine Grenze | auf 24 gekürzt |
+| gesendet | WP826 speichert |
+|---|---|
+| `Mobile` | `Cell` — akzeptiert, umbenannt |
+| `Home` | `Home` |
+| `Work` | `Work` |
+| `Fax` | **`Work`** — kein eigener Slot |
+| `Other` | **`Work`** — kein eigener Slot, und bei belegtem `Work`: **kommentarlos verworfen** |
 
-`Cell` kennt die WP-Reihe nicht — bestätigt auch durch den Kontakt-Editor des WP8x6
-(Work/Home/Mobile) und die Online-Contacts-Schlüssel `extensionHome`/`extensionMobile`.
+Das Gerät hat also **drei Slots**, nicht fünf. Der WP820 XML Phonebook Guide nennt
+zwar `Work/Home/Mobile/Fax/Other`, aber seine Contact-Tabelle verweist auf den
+**GXV3275** — er ist streckenweise aus der GXV-Doku kopiert, und Fax/Other sind dort
+Erbstücke.
 
-iCloud kennt beliebig viele Nummern mit freien Labels. Der Konverter ist trotzdem
-**verlustfrei**:
+Daraus die wichtigste Regel: **niemals `Fax` oder `Other` senden.** Sonst überlässt man
+dem Gerät die Slot-Vergabe, und das verwirft bei Kollision still. Zwei echte Nummern
+gingen genau so verloren, während der Report „verlustfrei" meldete. Alle Verteilung
+passiert deshalb hier, wo sie sichtbar ist.
+
+Weitere am Gerät gemessene Fakten:
+
+- **`accountindex` = `0`** (Spec: „0 to 5 for account 1 to account 6"). Das
+  FusionPBX-Template schreibt `1` und zeigt damit auf ein zweites SIP-Konto.
+- **Namensfelder werden bei 18 Zeichen gekappt** — pro Feld. Wer einen Nachnamen hat,
+  bekommt also 2×18 und die Anzeige scrollt. Steht der ganze Name im Vornamen (typisch
+  bei Firmen), sind bei 18 Schluss. Die Spec nennt gar keine Länge, das
+  FusionPBX-Template 24 — beides falsch.
+- **`<Company>` wird angezeigt**, obwohl der WP820-Guide es in der Contact-Spec gar
+  nicht führt (nur FirstName/LastName/Primary/Frequent/Ringtone/Phone/Group). Der
+  Guide ist dort unvollständig, nicht der Code.
+- **`<Frequent>1</Frequent>` wird übernommen** — der Export zeigt es auf genau den
+  konfigurierten Favoriten.
+
+## Rufnummern-Verteilung
+
+iCloud kennt beliebig viele Nummern mit freien Labels, das Gerät drei Slots. Der
+Konverter ist trotzdem **verlustfrei**:
 
 1. Jede Nummer in ihren Wunsch-Slot: `MOBILE`/`IPHONE`/`Mobil`/`WhatsApp` → Mobile,
-   `HOME`/`Homeoffice` → Home, `WORK`/`MAIN` → Work, alles mit „FAX" → Fax,
-   `OTHER`/`PAGER` → Other, **kein Label** → Mobile.
-2. Wer verdrängt wird, rutscht in einen freien Slot — **Other zuerst**, weil das die
-   ehrlichste Aussage über eine Zweitnummer ist. Der Typ ist dann ungenau, aber die
-   Nummer wählbar. Ein Label ist Kosmetik, eine fehlende Nummer nicht.
-   **In den Fax-Slot rutscht nie eine Sprachnummer** — die würde man nicht anrufen.
-3. Passt dann noch immer nicht alles, entsteht ein zweiter Eintrag „Name (2)".
+   `HOME`/`Homeoffice` → Home, `WORK`/`MAIN`/`OTHER`/`PAGER` und alles mit „FAX" →
+   Work, **kein Label** → Mobile.
+2. Wer verdrängt wird, rutscht in einen freien Slot. Der Typ ist dann ungenau, aber
+   die Nummer wählbar — ein Label ist Kosmetik, eine fehlende Nummer nicht.
+3. Passt dann noch immer nicht alles (mehr als drei Nummern), entsteht ein zweiter
+   Eintrag „Name (2)".
 
-Faxnummern werden nicht verworfen — `Fax` ist ein gültiger Typ und kostet keinen
-Sprach-Slot. **Aber: das WP826 zeigt den Fax-Slot nicht an** (am Gerät geprüft). Die
-Nummer steht im XML und ist spec-konform, auf diesem Modell aber unsichtbar. Der
-Report weist Faxnummern deshalb gesondert aus, statt sie unter „verlustfrei" zu
-verbuchen. Wer sie am Telefon braucht, pflegt sie in iCloud als normale Nummer.
+Faxnummern gehen nicht verloren, erscheinen am Telefon aber als `Work` — das ist die
+Realität des Geräts, nicht unsere Wahl.
 
 Was das bei den echten Daten kostet:
 
@@ -181,14 +203,13 @@ Was das bei den echten Daten kostet:
 make report
 ```
 
-Der Bericht zeigt Label-Verteilung, unbekannte Labels, Nummern mit ungenauem Typ und
-Zusatzeinträge — und ob unterm Strich etwas verloren geht. **Enthält echte Namen und
-Rufnummern**, deshalb nur auf den Bildschirm, nie ins Repo.
+Der Bericht zeigt Label-Verteilung, unbekannte Labels, Nummern mit ungenauem Typ,
+Zusatzeinträge, zu lange Namen — und ob unterm Strich etwas verloren geht. **Enthält
+echte Namen und Rufnummern**, deshalb nur auf den Bildschirm, nie ins Repo.
 
-`<Company>` taucht im WP820-XML-Guide nirgends auf (die Contact-Spec kennt nur
-FirstName/LastName/Primary/Frequent/Ringtone/Phone/Group), wird vom WP826 aber
-ausgewertet und angezeigt — am Gerät verifiziert. Der Guide ist an dieser Stelle
-unvollständig, nicht der Code.
+Zu lange Namen werden **gemeldet, nicht automatisch aufgeteilt**: iCloud bleibt Quelle
+der Wahrheit. Wen die Kürzung stört, kürzt dort — oder gibt dem Kontakt einen
+Nachnamen, dann sind es 2×18.
 
 ## Fehler-E-Mail
 
