@@ -13,12 +13,14 @@ venv:
 install-dev: venv
 	$(PIP) install py2app
 
-# Beide Suiten: Konverter (ohne Netz/Daten) und Server (Guards + HTTP).
+# Konverter (Mapping), Server (Guards + HTTP) und Notifier (Debounce).
+# Kein Netz, kein Mailversand, keine echten Daten.
 test:
 	$(PY) tests/test_convert.py
 	$(PY) tests/test_server.py
+	$(PY) tests/test_notify.py
 
-# Was kostet das Drei-Slot-Limit bei den echten Daten? Enthält echte Namen und
+# Was kosten die Slot-Grenzen bei den echten Daten? Enthält echte Namen und
 # Rufnummern -> nur auf den Bildschirm, nie ins Repo.
 report:
 	$(PY) convert.py --report

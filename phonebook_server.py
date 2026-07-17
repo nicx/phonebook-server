@@ -27,6 +27,7 @@ from pathlib import Path
 import rumps
 
 import convert
+import notify
 import settings as cfgmod
 
 __version__ = "1.0.0"
@@ -59,11 +60,18 @@ class PhonebookBuilder:
     (~200 stat()-Aufrufe, vernachlässigbar) und nur bei echter Änderung neu gebaut.
     """
 
-    def __init__(self):
+    def __init__(self, notifier=None):
         self._lock = threading.Lock()
         self.last_error: str | None = None
         self.contact_count = 0
         self.entry_count = 0
+        # Optional: meldet source_broken/Recovery. Ohne Notifier bleibt alles still —
+        # so bleiben Builder-Tests frei von Mailversand.
+        self._notifier = notifier
+
+    def _report(self, healthy: bool, detail: str = "") -> None:
+        if self._notifier is not None:
+            self._notifier.report("source_broken", healthy=healthy, detail=detail)
 
     # -- Quellen -------------------------------------------------------------
     def _account_dirs(self, cfg) -> list[Path]:
@@ -114,12 +122,26 @@ class PhonebookBuilder:
             if not complete:
                 self.last_error = "Quelle nicht vollständig lesbar (Mount weg?)"
                 LOGGER.warning("Kein Rebuild: %s", self.last_error)
+                self._report(False, f"{self.last_error}\nQuelle: {cfg['source_base']}\n"
+                                    f"Accounts: {', '.join(cfg['accounts'])}\n\n"
+                                    "Das Telefonbuch bleibt auf dem letzten guten Stand.")
                 return cfgmod.CACHE_PATH.exists()
             if n_files == 0:
                 # Alle Verzeichnisse da, aber leer: kein Ergebnis, sondern ein Symptom.
                 self.last_error = "Quelle enthält 0 Kontaktdateien — Cache behalten"
                 LOGGER.warning("Kein Rebuild: %s", self.last_error)
+                self._report(False, f"{self.last_error}\nQuelle: {cfg['source_base']}\n"
+                                    f"Accounts: {', '.join(cfg['accounts'])}\n\n"
+                                    "Das Telefonbuch bleibt auf dem letzten guten Stand.")
                 return cfgmod.CACHE_PATH.exists()
+
+            # Ab hier ist die Quelle nachweislich lesbar — unabhängig davon, ob
+            # gleich gebaut wird. Die Entwarnung gehört genau hierher und NICHT
+            # hinter den Rebuild: kommt der Mount zurück, ohne dass sich ein Kontakt
+            # geändert hat, greift unten die Frische-Prüfung und springt raus. Die
+            # Recovery-Mail käme dann nie, und die Bedingung bliebe für immer auf
+            # "Problem".
+            self._report(True)
 
             if not force and cfgmod.CACHE_PATH.exists():
                 try:
@@ -134,11 +156,15 @@ class PhonebookBuilder:
             except Exception as exc:  # noqa: BLE001 - Cache retten, nie den Server kippen
                 self.last_error = f"Lesen fehlgeschlagen: {exc}"
                 LOGGER.exception("Rebuild fehlgeschlagen")
+                self._report(False, f"{self.last_error}\n\n"
+                                    "Das Telefonbuch bleibt auf dem letzten guten Stand.")
                 return cfgmod.CACHE_PATH.exists()
 
             if not contacts:
                 self.last_error = "Quelle lieferte 0 Kontakte — Cache behalten"
                 LOGGER.warning("Kein Rebuild: %s", self.last_error)
+                self._report(False, f"{self.last_error}\n\n"
+                                    "Das Telefonbuch bleibt auf dem letzten guten Stand.")
                 return cfgmod.CACHE_PATH.exists()
 
             try:
@@ -153,6 +179,7 @@ class PhonebookBuilder:
             except Exception as exc:  # noqa: BLE001
                 self.last_error = f"Schreiben fehlgeschlagen: {exc}"
                 LOGGER.exception("Rebuild fehlgeschlagen")
+                self._report(False, f"{self.last_error}\nZiel: {cfgmod.CACHE_PATH}")
                 return cfgmod.CACHE_PATH.exists()
 
             self.contact_count = len(contacts)
@@ -160,6 +187,7 @@ class PhonebookBuilder:
             self.last_error = None
             LOGGER.info("Telefonbuch gebaut: %d Kontakte -> %d Einträge, %d Bytes",
                         len(contacts), entries, len(xml))
+            self._report(True)
             return True
 
     def read_cache(self) -> bytes | None:
@@ -260,8 +288,13 @@ class PhonebookApp(rumps.App):
         self.log = setup_logging()
         self.cfg = cfgmod.load_settings()
         cfgmod.save_settings(self.cfg)  # Defaults sichtbar machen
-        self.builder = PhonebookBuilder()
+        # settings_provider statt fester Werte: Änderungen an settings.json wirken
+        # beim nächsten Reload, ohne die Instanz neu zu bauen.
+        self.notifier = notify.NotifierState(lambda: self.cfg)
+        self.builder = PhonebookBuilder(notifier=self.notifier)
         self.httpd = None
+
+        self._report_stale_crash()
 
         self.status_item = rumps.MenuItem("Status: startet…")
         self.count_item = rumps.MenuItem("Kontakte: –")
@@ -272,6 +305,7 @@ class PhonebookApp(rumps.App):
             rumps.MenuItem("Jetzt neu bauen", callback=self.rebuild),
             rumps.MenuItem("Passwort setzen…", callback=self.set_password),
             None,
+            rumps.MenuItem("Test-E-Mail senden", callback=self.send_test_mail),
             rumps.MenuItem("Log öffnen…", callback=self.open_log),
             rumps.MenuItem("Einstellungen öffnen…", callback=self.open_settings),
             None,
@@ -279,6 +313,25 @@ class PhonebookApp(rumps.App):
         ]
         self.start()
         rumps.Timer(self.tick, 10).start()
+
+    def _report_stale_crash(self):
+        """Meldet einen unsauber beendeten Vorlauf — einmalig, ohne Zustandslogik.
+
+        Liegt der Marker beim Start noch da, wurde die App beim letzten Mal nicht
+        über "Beenden" verlassen (Absturz, Force Quit, harter Reboot). Der Marker
+        wird gleich neu gesetzt, die Meldung kommt also genau einmal pro Vorfall.
+        """
+        stale = cfgmod.stale_crash_marker()
+        if not stale:
+            return
+        self.log.warning("Letzter Lauf endete unsauber: %s", stale)
+        self.notifier.notify_event(
+            "Letzter Lauf endete unsauber",
+            "Beim Start lag noch der Marker des Vorlaufs — die App wurde nicht über "
+            "„Beenden“ verlassen (Absturz, Force Quit oder harter Reboot).\n\n"
+            f"Vorlauf: {stale}\n\n"
+            "Das Telefonbuch selbst nimmt keinen Schaden: der Cache liegt auf der "
+            "Platte und wird beim Start neu geprüft.")
 
     def start(self):
         pw = cfgmod.get_password(self.cfg["basic_auth_user"])
@@ -288,8 +341,12 @@ class PhonebookApp(rumps.App):
             self.status_item.title = "Status: kein Passwort gesetzt"
             self.log.warning("Kein Keychain-Passwort für %s — Server nicht gestartet.",
                              self.cfg["basic_auth_user"])
-            rumps.notification(APP_TITLE, "Kein Passwort gesetzt",
-                               "Menü → „Passwort setzen…", sound=False)
+            self.notifier.problem(
+                "server_down",
+                f"Für den Benutzer „{self.cfg['basic_auth_user']}“ liegt kein Passwort "
+                "im Schlüsselbund. Der Server lauscht deshalb nicht — das Telefon "
+                "bekommt „Connection refused“.\n\n"
+                "Beheben: Menü → „Passwort setzen…“.")
             return
         self.builder.refresh(self.cfg, force=True)
         try:
@@ -298,8 +355,18 @@ class PhonebookApp(rumps.App):
             self.status_item.title = f"Status: Port belegt ({self.cfg['port']})"
             self.log.error("Bind auf %s:%s fehlgeschlagen: %s",
                            self.cfg["bind"], self.cfg["port"], exc)
-            rumps.alert(APP_TITLE, f"Port {self.cfg['port']} ist belegt:\n{exc}")
+            self.notifier.problem(
+                "server_down",
+                f"Der Server konnte {self.cfg['bind']}:{self.cfg['port']} nicht "
+                f"belegen: {exc}\n\n"
+                "Das Telefon bekommt „Connection refused“. Meist läuft schon eine "
+                "zweite Instanz — prüfen mit:\n"
+                f"  lsof -nP -iTCP:{self.cfg['port']} -sTCP:LISTEN")
             return
+        # Marker erst setzen, wenn wirklich gelauscht wird: sonst meldete ein
+        # sauberer Abbruch beim Start später fälschlich einen Absturz.
+        cfgmod.arm_crash_marker(int(self.cfg["port"]))
+        self.notifier.healthy("server_down")
         self.log.info("Lauscht auf %s:%s%s", self.cfg["bind"], self.cfg["port"], URL_PATH)
 
     def tick(self, _):
@@ -355,9 +422,39 @@ class PhonebookApp(rumps.App):
         cfgmod.save_settings(self.cfg)
         subprocess.run(["open", str(cfgmod.SETTINGS_PATH)])
 
+    def send_test_mail(self, _):
+        """Prüft den kompletten Mailweg bis zum MailRelay — ohne auf einen echten
+        Fehler zu warten."""
+        if not self.cfg.get("notify_to"):
+            rumps.alert(APP_TITLE,
+                        "Kein Empfänger gesetzt.\n\nIn den Einstellungen "
+                        "„notify_to“ eintragen und „notify_enabled“ auf true setzen.")
+            return
+        ok = notify.send_mail(
+            self.cfg.get("smtp_host", "localhost"), int(self.cfg.get("smtp_port", 2525)),
+            self.cfg.get("notify_from") or self.cfg["notify_to"], self.cfg["notify_to"],
+            "phonebook-server: Test-E-Mail",
+            f"Der Mailweg funktioniert.\n\nRelay: {self.cfg.get('smtp_host')}:"
+            f"{self.cfg.get('smtp_port')}\nServer: {self.cfg['bind']}:{self.cfg['port']}")
+        if ok:
+            rumps.notification(APP_TITLE, "Test-E-Mail verschickt",
+                               self.cfg["notify_to"], sound=False)
+        else:
+            rumps.alert(APP_TITLE,
+                        f"Test-E-Mail fehlgeschlagen.\n\nRelay "
+                        f"{self.cfg.get('smtp_host')}:{self.cfg.get('smtp_port')} "
+                        "nicht erreichbar? Details im Log.")
+
     def quit_app(self, _):
         if self.httpd is not None:
             self.httpd.shutdown()
+        # Gewolltes Beenden ist kein Absturz und kein Problem: Marker weg, damit der
+        # nächste Start nichts meldet, und die Bedingung still auf gesund — sonst
+        # käme beim nächsten Start eine "lauscht wieder"-Mail für ein Problem, das
+        # es nie gab.
+        cfgmod.disarm_crash_marker()
+        self.notifier.clear("server_down")
+        self.log.info("Beendet über das Menü")
         rumps.quit_application()
 
 

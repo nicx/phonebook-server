@@ -22,6 +22,10 @@ SETTINGS_PATH = SUPPORT / "settings.json"
 CACHE_PATH = SUPPORT / "phonebook.xml"
 LOGS_DIR = SUPPORT / "logs"
 LOG_PATH = LOGS_DIR / f"{APP_NAME}.log"
+# Absturz-Marker. Bewusst in App Support und NICHT unter /var/run: letzteres leert
+# macOS beim Boot, ein Absturz beim Herunterfahren bliebe damit unsichtbar
+# (Begründung übernommen aus ntp-server/CrashMarker.swift).
+CRASH_MARKER_PATH = SUPPORT / "running.marker"
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -34,6 +38,16 @@ DEFAULTS = {
     "bind": "0.0.0.0",
     "port": 8081,
     "basic_auth_user": "wp826",
+    # Fehler-Mail über das lokale MailRelay (kein Auth/TLS auf diesem Hop).
+    "notify_enabled": False,
+    "notify_to": "",      # leer = aus. Adressen sind Laufzeitdaten, nie im Repo.
+    "notify_from": "",    # leer = notify_to
+    # "localhost", NICHT "127.0.0.1": macOS löst localhost zuerst nach ::1 auf und
+    # umgeht damit die Eigenheit des MailRelay-Bundles, reines IPv4-Loopback nur
+    # sporadisch anzunehmen — behält aber den IPv4-Fallback, falls IPv6 fehlt.
+    # (Gleiche Begründung wie ntp-server/MailNotifier.swift.)
+    "smtp_host": "localhost",
+    "smtp_port": 2525,
 }
 
 
@@ -63,6 +77,36 @@ def save_settings(cfg: dict) -> None:
     secure_dir(SUPPORT)
     SETTINGS_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     _chmod(SETTINGS_PATH, FILE_MODE)
+
+
+# ------------------------------------------------------------ Crash-Marker ---
+# Ein abgestürzter Prozess kann nicht mehr über sich selbst berichten, also läuft es
+# indirekt: beim Start einen Marker setzen, bei sauberem Beenden entfernen. Liegt er
+# beim nächsten Start noch da, endete der Vorlauf unsauber. Muster: ntp-server.
+#
+# Grenze, die das nicht löst: bleibt die App dauerhaft tot, kommt auch keine Mail —
+# es gibt niemanden, der sie startet. Das teilt sie mit allen Menüleisten-Apps hier
+# (evcc, icloud-sync, home-assistant): die überwachen ihren Kindprozess, nicht sich
+# selbst. Wer das abdecken will, braucht einen Beobachter von außen.
+
+def arm_crash_marker(port: int) -> None:
+    secure_dir(SUPPORT)
+    stamp = __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")
+    CRASH_MARKER_PATH.write_text(f"pid={os.getpid()} port={port} gestartet={stamp}\n",
+                                 encoding="utf-8")
+    _chmod(CRASH_MARKER_PATH, FILE_MODE)
+
+
+def disarm_crash_marker() -> None:
+    CRASH_MARKER_PATH.unlink(missing_ok=True)
+
+
+def stale_crash_marker() -> str | None:
+    """Inhalt des Markers vom Vorlauf, falls dieser nicht sauber endete."""
+    try:
+        return CRASH_MARKER_PATH.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------- Keychain ---

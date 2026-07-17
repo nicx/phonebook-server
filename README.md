@@ -54,7 +54,13 @@ mit Defaults angelegt):
   "source_base": "/Volumes/macmini_data/iCloudSync",
   "bind": "0.0.0.0",
   "port": 8081,
-  "basic_auth_user": "wp826"
+  "basic_auth_user": "wp826",
+
+  "notify_enabled": false,
+  "notify_to": "",
+  "notify_from": "",
+  "smtp_host": "localhost",
+  "smtp_port": 2525
 }
 ```
 
@@ -141,6 +147,42 @@ Rufnummern**, deshalb nur auf den Bildschirm, nie ins Repo.
 FirstName/LastName/Primary/Frequent/Ringtone/Phone/Group), wird vom WP826 aber
 ausgewertet und angezeigt — am Gerät verifiziert. Der Guide ist an dieser Stelle
 unvollständig, nicht der Code.
+
+## Fehler-E-Mail
+
+Versand über das lokale [MailRelay](https://github.com/nicx/mailrelay) per einfachem
+SMTP (kein Auth/TLS auf diesem Hop — das macht das Relay). `notify_to` setzen und
+`notify_enabled` auf `true`; Menü → **„Test-E-Mail senden"** prüft den Weg sofort.
+
+Relay-Default ist **`localhost`**, bewusst nicht `127.0.0.1`: macOS löst `localhost`
+zuerst nach `::1` auf und umgeht damit die Eigenheit des MailRelay-Bundles, reines
+IPv4-Loopback nur sporadisch anzunehmen — behält aber den IPv4-Fallback.
+
+Gemailt wird **nur bei einem Zustandswechsel** (Debounce-State-Machine, portiert aus
+`evcc/src/notifier_state.py`): eine Mail gesund→Problem, eine Mail Problem→gesund.
+Eine anhaltende Störung schweigt, sonst käme bei jedem Telefon-Poll eine Mail.
+
+| Bedingung | Auslöser |
+|---|---|
+| `source_broken` | SMB-Mount weg, 0 Kontaktdateien, Lese-/Schreibfehler |
+| `server_down` | Port belegt oder kein Passwort im Schlüsselbund → Telefon bekommt „Connection refused" |
+| *(One-Shot)* | Beim Start lag noch der Marker des Vorlaufs → letzter Lauf endete unsauber |
+
+### Was das *nicht* abdeckt
+
+**Eine tote App kann sich nicht selbst melden.** Bleibt der Prozess dauerhaft weg,
+kommt keine Mail — es gibt niemanden, der ihn startet.
+
+Das teilt phonebook-server mit allen Menüleisten-Apps hier: `home-assistant`, `evcc`,
+`matter-server` und `esphome` sind **Supervisor + Kindprozess** und überwachen ihr
+Kind, nicht sich selbst. Der Unterschied: phonebook-server *hat* kein Kind — es ist
+der Server. Deshalb decken die In-Process-Bedingungen hier genau die Fälle ab, in
+denen die App lebt, der Dienst aber nicht.
+
+Der Absturz-Marker schließt die Lücke nur halb: er meldet beim **nächsten** Start,
+dass der Vorlauf unsauber endete. Wer eine Mail will, *während* die App tot ist,
+braucht einen Beobachter von außen (z. B. einen REST-Sensor in Home Assistant auf
+`http://<mac>:8081/phonebook.xml`).
 
 ## Robustheit
 
