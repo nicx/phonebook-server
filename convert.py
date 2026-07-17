@@ -86,8 +86,13 @@ LABEL_TO_SLOT = {
 DEFAULT_SLOT = "Mobile"
 
 # Fax-Varianten ("WORK FAX", "HOME FAX", "Fax privat", …) auf den Fax-Slot. Sie
-# werden NICHT verworfen: "Fax" ist ein gültiger type-Wert, kostet keinen
-# Sprach-Slot und bleibt so wenigstens nachschlagbar.
+# werden nicht verworfen: "Fax" ist ein gültiger type-Wert und kostet keinen
+# Sprach-Slot.
+#
+# ABER: das WP826 zeigt den Fax-Slot **nicht** an (am Gerät geprüft) — spec-konform
+# heißt hier nicht sichtbar. Deshalb weist build_report() Faxnummern gesondert aus,
+# statt sie unter "verlustfrei" zu verbuchen. Wer sie am Telefon braucht, pflegt sie
+# in iCloud als normale Nummer.
 FAX_LABEL_RE = re.compile(r"FAX", re.IGNORECASE)
 
 
@@ -406,10 +411,26 @@ def build_report(contacts: list[Contact]) -> str:
         lines.append("Kontakte mit Zusatzeintrag: keine")
     lines.append("")
 
-    # Die eigentliche Kernaussage: geht irgendwo etwas verloren?
+    # Faxnummern gesondert: sie stehen spec-konform im XML, das WP826 zeigt den
+    # Fax-Slot aber NICHT an (am Gerät geprüft). Sie hier stillschweigend unter
+    # "verlustfrei" mitzuzählen wäre eine Lüge — am Telefon sind sie unsichtbar.
+    faxes = [(c, n) for c in contacts for e in plan_entries(c)
+             for s, n in e.slots.items() if s == "Fax"]
+    if faxes:
+        lines.append(f"Faxnummern: {len(faxes)} — im XML, am WP826 aber NICHT sichtbar")
+        for c, n in faxes:
+            lines.append(f"  {c.display} ({c.account}): {n}")
+    else:
+        lines.append("Faxnummern: keine")
+    lines.append("")
+
+    # Die eigentliche Kernaussage: kommt am Telefon alles an?
     placed = sum(len(e.slots) for c in contacts for e in plan_entries(c))
+    visible = placed - len(faxes)
     lines.append(f"Rufnummern im XML: {placed} von {n_phones} "
                  + ("— verlustfrei" if placed == n_phones else "— ACHTUNG, Verlust!"))
+    lines.append(f"davon am WP826 sichtbar: {visible}"
+                 + (f" ({len(faxes)} Fax unsichtbar)" if faxes else ""))
 
     return "\n".join(lines)
 

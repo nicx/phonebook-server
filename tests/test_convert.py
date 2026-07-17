@@ -112,6 +112,28 @@ def test_fax_label_variants():
         check(convert._slot_for(label) == "Fax", f"Label {label!r} -> Fax")
 
 
+def test_report_flags_fax_as_invisible():
+    """Faxnummern stehen spec-konform im XML, das WP826 zeigt den Fax-Slot aber nicht
+    an. Sie unter "verlustfrei" mitzuzählen wäre eine Lüge — der Report muss sie
+    getrennt ausweisen."""
+    raw = {"contactId": "F1", "firstName": "Gitta", "lastName": "Fax",
+           "phones": [
+               {"field": "+49 30 2312590", "label": "HOME"},
+               {"field": "+49 30 2312591", "label": "HOME FAX"},
+           ]}
+    report = convert.build_report([convert.contact_from_icloud(raw)])
+    check("NICHT sichtbar" in report, "Report warnt, dass Fax am Gerät unsichtbar ist")
+    check("+49302312591" in report, "die betroffene Nummer wird benannt")
+    check("davon am WP826 sichtbar: 1" in report,
+          "die Sichtbarkeitszahl zählt das Fax nicht mit")
+
+    ohne = {"contactId": "F2", "firstName": "Hein",
+            "phones": [{"field": "+49 30 2312592", "label": "MOBILE"}]}
+    r2 = convert.build_report([convert.contact_from_icloud(ohne)])
+    check("Faxnummern: keine" in r2, "ohne Fax bleibt der Report ruhig")
+    check("unsichtbar" not in r2, "und warnt dann auch nicht")
+
+
 def test_accountindex_is_first_account():
     """Spec: "From 0 to 5 for account 1 to account 6". 0 ist das ERSTE Konto.
     Das FusionPBX-Template schreibt 1 und zeigt damit auf ein zweites Konto,
@@ -363,6 +385,7 @@ if __name__ == "__main__":
     test_contact_without_label()
     test_all_five_slots()
     test_fax_label_variants()
+    test_report_flags_fax_as_invisible()
     test_accountindex_is_first_account()
     test_slot_collision_spills_into_other()
     test_voice_number_never_spills_into_fax()

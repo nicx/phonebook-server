@@ -121,9 +121,11 @@ iCloud kennt beliebig viele Nummern mit freien Labels. Der Konverter ist trotzde
    **In den Fax-Slot rutscht nie eine Sprachnummer** — die würde man nicht anrufen.
 3. Passt dann noch immer nicht alles, entsteht ein zweiter Eintrag „Name (2)".
 
-Faxnummern werden **nicht** verworfen: `Fax` ist ein gültiger Typ und kostet keinen
-Sprach-Slot. Am WP826 verifiziert — der Fax-Slot wird angezeigt, obwohl der
-Kontakt-Editor des Geräts ihn nicht anbietet.
+Faxnummern werden nicht verworfen — `Fax` ist ein gültiger Typ und kostet keinen
+Sprach-Slot. **Aber: das WP826 zeigt den Fax-Slot nicht an** (am Gerät geprüft). Die
+Nummer steht im XML und ist spec-konform, auf diesem Modell aber unsichtbar. Der
+Report weist Faxnummern deshalb gesondert aus, statt sie unter „verlustfrei" zu
+verbuchen. Wer sie am Telefon braucht, pflegt sie in iCloud als normale Nummer.
 
 Was das bei den echten Daten kostet:
 
