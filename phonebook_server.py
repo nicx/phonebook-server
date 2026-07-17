@@ -26,6 +26,7 @@ from pathlib import Path
 
 import rumps
 
+import autostart
 import convert
 import notify
 import settings as cfgmod
@@ -585,9 +586,16 @@ class PhonebookApp(rumps.App):
             ], "Versand über das lokale MailRelay (kein Auth/TLS auf diesem Hop).\n"
                "Absender leer = Empfänger. Gemailt wird nur bei einem Zustands-"
                "wechsel, nicht bei jedem Poll."),
+            ("System", [
+                ("Beim Login starten", "check", "login_item"),
+            ], "Startet die App automatisch nach der Anmeldung (LaunchAgent).\n"
+               "Braucht die installierte .app — aus dem Quelltext heraus nicht möglich."),
         ]
         initial = dict(self.cfg)
         initial["accounts"] = ", ".join(self.cfg.get("accounts") or [])
+        # Kein cfg-Feld: der Zustand IST die plist. Eine Kopie in settings.json könnte
+        # auseinanderlaufen (plist von Hand gelöscht -> Haken zeigt weiter "an").
+        initial["login_item"] = autostart.is_enabled()
         # Leer heißt "unverändert" — beim allerersten Mal gibt es aber nichts zu
         # behalten, da ist ein fertiger Vorschlag hilfreicher als ein leeres Feld.
         initial["password"] = "" if has_pw else secrets.token_urlsafe(12)
@@ -617,6 +625,8 @@ class PhonebookApp(rumps.App):
         if pw and not cfgmod.set_password(self.cfg["basic_auth_user"], pw):
             self._notices.append("Passwort konnte nicht im Schlüsselbund gespeichert werden.")
 
+        self._apply_login_item(bool(raw.get("login_item")))
+
         # Ein neu gesetztes Passwort ist listener-relevant: der Server hält es in
         # der Handler-Klasse, ein reines Neuladen der Config bekäme es nicht mit.
         if pw:
@@ -624,6 +634,31 @@ class PhonebookApp(rumps.App):
         else:
             self._apply_settings(old)
         return []
+
+    def _apply_login_item(self, want: bool) -> None:
+        """Autostart ein-/ausschalten — nur bei echtem Zustandswechsel.
+
+        Sonst schriebe jedes Speichern die plist neu und lud sie über launchctl
+        wieder — laut, unnötig und eine Fehlerquelle mehr (Muster mailrelay).
+        """
+        if want == autostart.is_enabled():
+            return
+        if not want:
+            autostart.disable()
+            self.log.info("Autostart deaktiviert")
+            return
+        args = autostart.program_args()
+        if args is None:
+            # Klare Ansage statt stiller Wirkungslosigkeit: aus dem Quelltext heraus
+            # gibt es kein Bundle, auf das der LaunchAgent zeigen könnte.
+            self._notices.append(
+                "Autostart geht nur mit der gebauten .app, nicht beim Start aus dem "
+                "Quelltext (python3 phonebook_server.py).")
+            return
+        try:
+            autostart.enable(args)
+        except OSError as exc:
+            self._notices.append(f"Autostart nicht aktiviert:\n{exc}")
 
     def send_test_mail(self, _):
         """Prüft den kompletten Mailweg bis zum MailRelay — ohne auf einen echten

@@ -40,8 +40,16 @@ Die gebaute App nach `/Applications` kopieren und **per Doppelklick** starten.
 > gestartete Instanz läuft headless weiter, belegt Port 8081 und ist ohne Menüleisten-
 > Symbol kaum wieder loszuwerden.
 
-Autostart: `launchagent/de.nicx.phonebook-server.plist` nach `~/Library/LaunchAgents/`
-kopieren und laden (siehe Kommentar in der Datei).
+`make app` **verweigert den Build, solange die App aus `dist/` läuft** — sonst löscht
+er ihr das Bundle unter den Füßen weg, und der Prozess läuft ausgegraut mit altem Code
+weiter (beenden geht dann nur noch per `kill`). Erst über die Menüleiste beenden.
+
+**Autostart:** Einstellungen → System → **„Beim Login starten"**. Schreibt einen
+LaunchAgent (`~/Library/LaunchAgents/de.nicx.phonebook-server.plist`) — bewusst statt
+`SMAppService`, das kommt ohne registrierten Helfer aus und funktioniert auch für ein
+ad-hoc-signiertes Eigengebrauch-Bundle. Bewusst **ohne** `KeepAlive`: das würde gegen
+„Beenden" im Menü ankämpfen. Aus dem Quelltext heraus geht es nicht — dann fehlt das
+Bundle, auf das der Agent zeigen müsste, und die App sagt das auch.
 
 ## Konfiguration
 

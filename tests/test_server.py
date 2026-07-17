@@ -452,6 +452,25 @@ def _raw(**over):
     return base
 
 
+def test_parse_settings_ignores_login_item():
+    """Der Autostart-Zustand IST die LaunchAgent-plist. Eine Kopie in settings.json
+    könnte auseinanderlaufen — plist von Hand gelöscht, Haken zeigt weiter "an"."""
+    values, errors = ps.parse_settings(_raw(login_item=True))
+    check(errors == [], "login_item stört die Validierung nicht")
+    check("login_item" not in values, "und landet NICHT in der Konfigurationsdatei")
+
+
+def test_autostart_args_none_outside_bundle():
+    """Aus dem Quelltext heraus gibt es kein Bundle, auf das ein LaunchAgent zeigen
+    könnte. Muss None liefern, damit die App das klar sagt statt still nichts zu tun."""
+    import autostart
+    check(autostart.program_args() is None,
+          "ohne sys.frozen kein Autostart (Tests laufen nie im Bundle)")
+    check(autostart.LABEL == "de.nicx.phonebook-server", "Label wie im LaunchAgent")
+    check(autostart.plist_path().name == "de.nicx.phonebook-server.plist",
+          "plist landet unter dem erwarteten Namen")
+
+
 def test_parse_settings_ok():
     values, errors = ps.parse_settings(_raw(accounts=" Familie , Timo "))
     check(errors == [], "gültige Eingaben ergeben keine Fehler")
@@ -501,6 +520,8 @@ def test_parse_settings_collects_all_errors():
 
 if __name__ == "__main__":
     try:
+        test_parse_settings_ignores_login_item()
+        test_autostart_args_none_outside_bundle()
         test_parse_settings_ok()
         test_parse_settings_ports()
         test_parse_settings_required_fields()
