@@ -245,6 +245,99 @@ def test_http_serves_stale_cache_on_broken_source():
         s.close()
 
 
+# --------------------------------------------------- Hinweis: lange Namen ---
+
+class _FakeNotifier:
+    def __init__(self):
+        self.events = []
+
+    def report(self, condition, healthy, detail=""):
+        pass
+
+    def notify_event(self, subject, body=""):
+        self.events.append((subject, body))
+        return True
+
+
+def _long_name_source(names):
+    src = _TMP / f"ln{time.monotonic_ns()}"
+    _write(src, "Familie", [_contact(f"L{i}", n, f"+49 30 23125{i:02d}")
+                            for i, n in enumerate(names)])
+    return src
+
+
+def test_long_name_mail_once_then_silent():
+    """Der Kern: die Liste ändert sich nicht -> keine zweite Mail. Sonst käme bei
+    jedem Rebuild eine."""
+    _reset_cache()
+    cfgmod.NOTIFIED_PATH.unlink(missing_ok=True)
+    n = _FakeNotifier()
+    b = ps.PhonebookBuilder(notifier=n)
+    cfg = _cfg(_long_name_source(["Robert-Bosch-Gymnasium Sekretariat", "Kurt"]))
+    b.refresh(cfg, force=True)
+    check(len(n.events) == 1, "ein zu langer Name -> genau eine Mail")
+    check("zu lang" in n.events[0][0], "der Betreff sagt worum es geht")
+    check("Robert-Bosch-Gymnasium Sekretariat" in n.events[0][1], "der Name steht drin")
+    check("Robert-Bosch-Gymna" in n.events[0][1], "und was am Telefon ankommt")
+    check("Kurt" not in n.events[0][1], "kurze Namen tauchen nicht auf")
+
+    for _ in range(3):
+        b.refresh(cfg, force=True)
+    check(len(n.events) == 1, "unveränderte Liste -> keine weitere Mail")
+
+
+def test_long_name_mail_on_change():
+    """Ein NEUER langer Name muss auffallen. Eine Ja-Nein-Debounce hätte hier
+    geschwiegen, weil der Zustand schon 'Problem' war."""
+    _reset_cache()
+    cfgmod.NOTIFIED_PATH.unlink(missing_ok=True)
+    n = _FakeNotifier()
+    b = ps.PhonebookBuilder(notifier=n)
+    b.refresh(_cfg(_long_name_source(["Robert-Bosch-Gymnasium Sekretariat"])), force=True)
+    check(len(n.events) == 1, "erster langer Name meldet sich")
+
+    b.refresh(_cfg(_long_name_source(["Robert-Bosch-Gymnasium Sekretariat",
+                                      "Pestalozzi-Schule Sekretariat"])), force=True)
+    check(len(n.events) == 2, "ein zweiter langer Name meldet sich ebenfalls")
+    check("Pestalozzi-Schule Sekretariat" in n.events[1][1], "und wird benannt")
+
+
+def test_long_name_all_clear():
+    _reset_cache()
+    cfgmod.NOTIFIED_PATH.unlink(missing_ok=True)
+    n = _FakeNotifier()
+    b = ps.PhonebookBuilder(notifier=n)
+    b.refresh(_cfg(_long_name_source(["Robert-Bosch-Gymnasium Sekretariat"])), force=True)
+    b.refresh(_cfg(_long_name_source(["Kurt"])), force=True)
+    check(len(n.events) == 2, "Entwarnung, wenn alle Namen wieder passen")
+    check("wieder alle darstellbar" in n.events[1][0], "und sie ist als solche erkennbar")
+
+    b.refresh(_cfg(_long_name_source(["Kurt"])), force=True)
+    check(len(n.events) == 2, "danach ist Ruhe — keine Entwarnung auf Dauerschleife")
+
+
+def test_long_name_state_survives_restart():
+    """Ohne Persistenz käme nach jedem App-Neustart dieselbe Mail — und die App wird
+    nach jedem Rebuild neu gestartet."""
+    _reset_cache()
+    cfgmod.NOTIFIED_PATH.unlink(missing_ok=True)
+    src = _long_name_source(["Robert-Bosch-Gymnasium Sekretariat"])
+    b1 = ps.PhonebookBuilder(notifier=_FakeNotifier())
+    b1.refresh(_cfg(src), force=True)
+
+    n2 = _FakeNotifier()  # frische Instanz = App-Neustart
+    ps.PhonebookBuilder(notifier=n2).refresh(_cfg(src), force=True)
+    check(n2.events == [], "nach dem Neustart kommt nichts erneut")
+
+
+def test_no_notifier_no_crash():
+    _reset_cache()
+    cfgmod.NOTIFIED_PATH.unlink(missing_ok=True)
+    b = ps.PhonebookBuilder()  # ohne Notifier
+    check(b.refresh(_cfg(_long_name_source(["Robert-Bosch-Gymnasium Sekretariat"])),
+                    force=True), "ohne Notifier läuft der Build normal durch")
+
+
 # ----------------------------------------------------------- Live-Übernahme ---
 
 class _HeadlessApp(ps.PhonebookApp):
@@ -415,6 +508,11 @@ if __name__ == "__main__":
         test_parse_settings_notify_needs_recipient()
         test_parse_settings_smtp_host_fallback()
         test_parse_settings_collects_all_errors()
+        test_long_name_mail_once_then_silent()
+        test_long_name_mail_on_change()
+        test_long_name_all_clear()
+        test_long_name_state_survives_restart()
+        test_no_notifier_no_crash()
         test_reload_picks_up_source_change_without_restart()
         test_reload_restarts_only_for_listener_fields()
         test_reload_ignores_touch_without_change()

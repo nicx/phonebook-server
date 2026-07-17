@@ -230,6 +230,15 @@ Eine anhaltende Störung schweigt, sonst käme bei jedem Telefon-Poll eine Mail.
 | `source_broken` | SMB-Mount weg, 0 Kontaktdateien, Lese-/Schreibfehler |
 | `server_down` | Port belegt oder kein Passwort im Schlüsselbund → Telefon bekommt „Connection refused" |
 | *(One-Shot)* | Beim Start lag noch der Marker des Vorlaufs → letzter Lauf endete unsauber |
+| *(One-Shot)* | Kontakte, deren Name das Gerät kappt — siehe unten |
+
+Die Namens-Mail läuft **nicht** über die Ja-Nein-Debounce, sondern dedupliziert über
+den **Inhalt**: sie kommt, sobald sich die Liste ändert. Sonst käme sie genau einmal
+und ein später hinzugekommener langer Name bliebe unbemerkt, weil die Bedingung schon
+auf „Problem" steht. Dasselbe Prinzip wie bei icloud-syncs Fehler-Mails („nur bei
+neuem/geändertem Problem"). Der Zustand liegt in `notified.json` — ohne Persistenz
+käme nach jedem App-Neustart dieselbe Mail, und die App wird nach jedem Rebuild neu
+gestartet. Sind alle Namen wieder darstellbar, gibt es eine Entwarnung.
 
 ### Was das *nicht* abdeckt
 

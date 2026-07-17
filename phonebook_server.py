@@ -76,6 +76,45 @@ class PhonebookBuilder:
         if self._notifier is not None:
             self._notifier.report("source_broken", healthy=healthy, detail=detail)
 
+    def _report_long_names(self, contacts) -> None:
+        """Mailt die Kontakte, deren Name das Gerät kappt — nur wenn sich die Liste
+        geändert hat.
+
+        Bewusst NICHT über report()/die Ja-Nein-Debounce: die schickt eine Mail beim
+        Übergang gesund->Problem und danach nie wieder. Kommt später ein weiterer zu
+        langer Name dazu, bliebe er unbemerkt, weil die Bedingung schon "Problem" ist.
+        Also über den Inhalt deduplizieren — wie icloud-sync es bei Fehlertexten macht
+        ("nur bei neuem/geändertem Problem").
+        """
+        if self._notifier is None:
+            return
+        cut = convert.long_names(contacts)
+        current = sorted(name for _, name in cut)
+        state = cfgmod.load_notified()
+        if state.get("long_names") == current:
+            return  # unverändert -> kein Dauerfeuer
+
+        if current:
+            lines = [f"{len(current)} Kontakte haben einen Namen, den das WP826 auf "
+                     f"{convert.MAX_NAME} Zeichen kappt:", ""]
+            lines += [f"  {n!r} ({len(n)})\n  -> am Telefon: {n[:convert.MAX_NAME]!r}"
+                      for n in current]
+            lines += ["",
+                      "Die 18 Zeichen gelten pro Feld. Wer einen Nachnamen hat, bekommt "
+                      "2x18 und die Anzeige scrollt — betroffen sind nur Kontakte, deren "
+                      "Name ganz im Vornamen steht.",
+                      "",
+                      "Beheben in iCloud: Namen kürzen oder den Namen auf Vor- und "
+                      "Nachname aufteilen. Nichts geht verloren, es ist nur abgeschnitten."]
+            self._notifier.notify_event("Namen zu lang fürs Telefon-Display", "\n".join(lines))
+        elif state.get("long_names"):
+            self._notifier.notify_event(
+                "Namen wieder alle darstellbar",
+                "Kein Kontakt hat mehr einen Namen, den das WP826 kappt.")
+
+        state["long_names"] = current
+        cfgmod.save_notified(state)
+
     # -- Quellen -------------------------------------------------------------
     def _account_dirs(self, cfg) -> list[Path]:
         base = Path(cfg["source_base"])
@@ -197,6 +236,7 @@ class PhonebookBuilder:
             self.entry_count = entries
             self.favorite_count = sum(1 for c in contacts if c.favorite)
             self.last_error = None
+            self._report_long_names(contacts)
             LOGGER.info("Telefonbuch gebaut: %d Kontakte -> %d Einträge, "
                         "%d Favoriten, %d Bytes",
                         len(contacts), entries, self.favorite_count, len(xml))

@@ -419,6 +419,24 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
 
 # ---------------------------------------------------------------------- Report ---
 
+def long_names(contacts: list[Contact]) -> list[tuple[Contact, str]]:
+    """Kontakte, deren Anzeigename das Gerät kappt. Rückgabe: (Kontakt, voller Name).
+
+    Betroffen sind nur die, deren Name ganz im **Vornamen** steht: die 18 Zeichen
+    gelten pro Feld, mit Nachname sind es also 2x18 und die Anzeige scrollt. In den
+    echten Daten sind das durchweg Firmen und Einrichtungen.
+
+    Wird von `build_report` **und** vom Server (Hinweis-Mail) genutzt — eine Quelle,
+    damit Report und Mail nie auseinanderlaufen.
+    """
+    out = []
+    for c in contacts:
+        first, last = c.name_fields()
+        if not last and len(first) > MAX_NAME:
+            out.append((c, first))
+    return out
+
+
 def _is_unknown_label(label: str) -> bool:
     """True, wenn `label` nur über den DEFAULT_SLOT-Fallback landet.
 
@@ -508,15 +526,9 @@ def build_report(contacts: list[Contact], unmatched_favorites=()) -> str:
         lines.append(f"  ACHTUNG, ohne Treffer: {', '.join(unmatched_favorites)}")
     lines.append("")
 
-    # Namen, die das Gerät kappt. Nicht wir kürzen zu knapp — das WP826 kann pro
-    # Feld nur 18 Zeichen (am Export gemessen). Betroffen sind nur Kontakte, deren
-    # Name ganz im Vornamen steht; mit Nachname sind es 2x18. Timos Entscheidung:
-    # nicht automatisch aufteilen, sondern melden — Kürzen passiert in iCloud.
-    cut = []
-    for c in contacts:
-        first, last = c.name_fields()
-        if not last and len(first) > MAX_NAME:
-            cut.append((c, first))
+    # Namen, die das Gerät kappt (18 pro Feld, am Export gemessen). Nicht automatisch
+    # aufteilen — iCloud bleibt Quelle der Wahrheit, gekürzt wird dort.
+    cut = long_names(contacts)
     if cut:
         lines.append(f"Namen, die das WP826 auf {MAX_NAME} Zeichen kappt: {len(cut)}")
         for c, first in cut:

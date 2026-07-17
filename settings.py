@@ -26,6 +26,9 @@ LOG_PATH = LOGS_DIR / f"{APP_NAME}.log"
 # macOS beim Boot, ein Absturz beim Herunterfahren bliebe damit unsichtbar
 # (Begründung übernommen aus ntp-server/CrashMarker.swift).
 CRASH_MARKER_PATH = SUPPORT / "running.marker"
+# Worüber schon gemailt wurde. Persistent, weil sonst jeder App-Neustart dieselbe
+# Hinweis-Mail erneut schickte — und die App wird nach jedem Rebuild neu gestartet.
+NOTIFIED_PATH = SUPPORT / "notified.json"
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -81,6 +84,26 @@ def save_settings(cfg: dict) -> None:
     secure_dir(SUPPORT)
     SETTINGS_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     _chmod(SETTINGS_PATH, FILE_MODE)
+
+
+def load_notified() -> dict:
+    """Zustand der Hinweis-Mails. Defensiv: kaputt/fehlend = noch nichts gemailt."""
+    try:
+        data = json.loads(NOTIFIED_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_notified(state: dict) -> None:
+    secure_dir(SUPPORT)
+    try:
+        NOTIFIED_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
+        _chmod(NOTIFIED_PATH, FILE_MODE)
+    except OSError as exc:
+        # Nicht schlimm: schlimmstenfalls kommt die Hinweis-Mail noch einmal.
+        LOGGER.warning("Notified-Zustand nicht speicherbar: %s", exc)
 
 
 # ------------------------------------------------------------ Crash-Marker ---
