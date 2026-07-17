@@ -60,6 +60,7 @@ mit Defaults angelegt):
 {
   "accounts": ["Familie"],
   "source_base": "/Volumes/macmini_data/iCloudSync",
+  "favorites": ["Oma Evi", "+491701234567"],
   "bind": "0.0.0.0",
   "port": 8081,
   "basic_auth_user": "wp826",
@@ -108,6 +109,38 @@ curl -u wp826:… http://192.168.2.1:8081/phonebook.xml | xmllint --format -
 
 **Aus dem LAN testen, nicht nur über `127.0.0.1`** — ein py2app-Bundle kann sich beim
 Loopback anders verhalten als im Netz (bei MailRelay ist genau das aufgefallen).
+
+## Spitzname und Favoriten
+
+**Spitzname ersetzt den Anzeigenamen.** Hat ein Kontakt in iCloud einen Spitznamen,
+steht am Telefon nur dieser: aus „Evi Schmitt" wird „Oma Evi". So heißen die Leute im
+Haushalt wirklich, und genau dafür ist das Feld gepflegt. Die Grandstream-Spec kennt
+kein Spitznamensfeld, also muss er in `FirstName`; `LastName` bleibt leer.
+
+> Der API-Schlüssel ist **`nickName`**, nicht `nickname`. An genau dieser Stelle
+> verliert `icloud-sync` den Spitznamen in seiner vCard — ein weiterer Grund, das
+> JSON zu lesen und nicht die vCard.
+
+**Favoriten** setzen `<Frequent>1</Frequent>`. Nötig, weil zwei Dinge zusammenkommen:
+iCloud kennt kein Favoriten-Flag (Apples Favoriten leben in der Telefon-App und kommen
+nicht über die Kontakte-API), und das WP826 baut seine Einträge bei jedem Download aus
+dem XML neu — eine am Gerät gesetzte Markierung wäre nach dem nächsten Poll weg.
+
+Die Liste steht deshalb in den Einstellungen. Ein Eintrag darf ein **Name** sein (wie
+am Telefon angezeigt, also inklusive Spitzname) oder eine **Rufnummer** (Schreibweise
+egal, verglichen wird normalisiert):
+
+```json
+"favorites": ["Oma Evi", "Opa Herbert", "+491701234567"]
+```
+
+Einträge ohne Treffer werden **nicht verschluckt** — sie landen im Log und im Report
+unter „ACHTUNG, ohne Treffer". Sonst sucht man einen Tippfehler am Telefon statt in
+der Konfiguration.
+
+Bei einem Kontakt mit so vielen Nummern, dass ein Folge-Eintrag entsteht, ist nur der
+**erste** Favorit: „Name (2)" ist eine Notlösung für überzählige Nummern, kein
+zweiter Favorit.
 
 ## Rufnummern-Typen
 

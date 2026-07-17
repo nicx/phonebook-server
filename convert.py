@@ -108,15 +108,34 @@ class Contact:
     first: str = ""
     last: str = ""
     company: str = ""
+    nick: str = ""
     phones: list[Phone] = field(default_factory=list)
+    favorite: bool = False
     account: str = ""  # Herkunfts-Account, nur für den Report
     source: str = ""   # Dateiname, nur für den Report
 
+    def name_fields(self) -> tuple[str, str]:
+        """Die beiden Namensfelder fürs XML: (FirstName, LastName).
+
+        Ein Spitzname ersetzt den Namen komplett — "Evi Schmitt" wird zu "Oma Evi".
+        Genau dafür ist das Feld gepflegt: so heißen die Leute im Haushalt wirklich.
+        Die Grandstream-Spec kennt kein Spitznamensfeld, also muss er in den Namen.
+
+        Ohne Spitzname: Vor-/Nachname. Fehlen beide, rückt die Firma in FirstName —
+        die Spec verlangt mindestens eines von beiden ("At least one of them has to
+        be specified"), ein leerer Eintrag wäre am Telefon nicht auffindbar.
+        """
+        if self.nick:
+            return self.nick, ""
+        if not self.first and not self.last:
+            return self.company, ""
+        return self.first, self.last
+
     @property
     def display(self) -> str:
-        """Name für Report/Logs — nie ins XML, dort zählen first/last einzeln."""
-        name = " ".join(p for p in (self.first, self.last) if p).strip()
-        return name or self.company or "(namenlos)"
+        """Name für Report/Logs — nie ins XML, dort zählen die Felder einzeln."""
+        first, last = self.name_fields()
+        return " ".join(p for p in (first, last) if p).strip() or "(namenlos)"
 
 
 # --------------------------------------------------------------- Normalisierung ---
@@ -161,6 +180,10 @@ def contact_from_icloud(raw: dict) -> Contact:
         first=(raw.get("firstName") or "").strip(),
         last=(raw.get("lastName") or "").strip(),
         company=(raw.get("companyName") or "").strip(),
+        # "nickName", nicht "nickname" — genau daran scheitert die vCard in
+        # icloud-sync (src/sync/contacts.py:157 liest den Key kleingeschrieben, die
+        # API liefert ihn camelCase). Deshalb lesen wir das JSON und nicht die vCard.
+        nick=(raw.get("nickName") or "").strip(),
     )
     for ph in raw.get("phones") or []:
         if not isinstance(ph, dict):
@@ -205,6 +228,42 @@ def load_contacts(source_base, accounts) -> list[Contact]:
             c.source = f.name
             out.append(c)
     return out
+
+
+def mark_favorites(contacts: list[Contact], favorites) -> list[str]:
+    """Setzt `favorite` auf den passenden Kontakten. Rückgabe: Einträge ohne Treffer.
+
+    Warum überhaupt nötig: iCloud kennt kein Favoriten-Flag — Apples Favoriten leben
+    in der Telefon-App und kommen nicht über die Kontakte-API. Und weil das Telefon
+    seine Einträge bei jedem Download aus dem XML neu baut, geht eine am Gerät
+    gesetzte Markierung verloren. Sie muss also aus dem XML kommen.
+
+    Ein Eintrag darf ein **Name** (wie am Telefon angezeigt, inkl. Spitzname) oder
+    eine **Rufnummer** sein. Nummern werden über `clean_number` verglichen, damit
+    "+49 170 1234567" und "+491701234567" derselbe Eintrag sind. Namen
+    case-insensitiv.
+
+    Die Rückgabe ist der Grund, warum das nicht still passiert: ein Tippfehler in der
+    Liste würde sonst einfach nie greifen, und man sucht den Fehler am Telefon.
+    """
+    wanted = [f.strip() for f in (favorites or []) if f.strip()]
+    if not wanted:
+        return []
+    by_name = {c.display.casefold(): c for c in contacts}
+    by_number: dict[str, Contact] = {}
+    for c in contacts:
+        for p in c.phones:
+            by_number.setdefault(p.number, c)
+
+    unmatched: list[str] = []
+    for entry in wanted:
+        hit = by_name.get(entry.casefold()) or by_number.get(clean_number(entry))
+        if hit is None:
+            unmatched.append(entry)
+            LOGGER.warning("Favorit ohne Treffer: %r", entry)
+        else:
+            hit.favorite = True
+    return unmatched
 
 
 def dedupe(contacts: list[Contact]) -> list[Contact]:
@@ -303,11 +362,7 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
                             c.display, phone.number, phone.slot, actual)
 
             el = ET.SubElement(root, "Contact")
-            first, last = c.first, c.last
-            if not first and not last:
-                # Reine Firmenkontakte: der Name muss irgendwo hin, sonst zeigt das
-                # Telefon einen leeren Eintrag.
-                first = c.company
+            first, last = c.name_fields()
             first, last = first[:MAX_NAME], last[:MAX_NAME]
             if n > 1:
                 # Folge-Eintrag für einen Kontakt mit mehr als drei Nummern.
@@ -321,6 +376,15 @@ def to_grandstream_xml(contacts: list[Contact]) -> bytes:
                     first = first[:MAX_NAME - len(suffix)] + suffix
             _sub(el, "FirstName", first)
             _sub(el, "LastName", last)
+            if c.favorite:
+                # Spec: "0: Default, 1: Mark this contact as frequent/favorite".
+                # Muss mitgeschickt werden — das Telefon baut seine Einträge bei
+                # jedem Download aus dem XML neu, eine am Gerät gesetzte Markierung
+                # fiele sonst auf 0 zurück.
+                #
+                # Nur beim ERSTEN Eintrag: ein Folge-Eintrag ("Name (2)") ist eine
+                # Notlösung für überzählige Nummern, kein zweiter Favorit.
+                _sub(el, "Frequent", "1" if n == 1 else "0")
             if c.company:
                 _sub(el, "Company", c.company[:MAX_NAME])
             for slot in SLOTS:  # feste Reihenfolge -> stabile Ausgabe
@@ -351,7 +415,7 @@ def _is_unknown_label(label: str) -> bool:
     return norm not in LABEL_TO_SLOT and not FAX_LABEL_RE.search(norm)
 
 
-def build_report(contacts: list[Contact]) -> str:
+def build_report(contacts: list[Contact], unmatched_favorites=()) -> str:
     """Menschenlesbarer Bericht: was kostet das Drei-Slot-Limit, was ist unbekannt?
 
     Absichtlich nicht ins Repo schreiben — enthält echte Namen und Rufnummern.
@@ -411,6 +475,25 @@ def build_report(contacts: list[Contact]) -> str:
         lines.append("Kontakte mit Zusatzeintrag: keine")
     lines.append("")
 
+    nicks = [c for c in contacts if c.nick]
+    if nicks:
+        lines.append(f"Kontakte mit Spitzname (ersetzt den Anzeigenamen): {len(nicks)}")
+        for c in nicks:
+            lines.append(f"  {c.first} {c.last}".rstrip() + f" -> „{c.nick}“")
+    else:
+        lines.append("Kontakte mit Spitzname: keine")
+    lines.append("")
+
+    favs = [c for c in contacts if c.favorite]
+    lines.append(f"Favoriten (<Frequent>1</Frequent>): {len(favs)}")
+    for c in favs:
+        lines.append(f"  {c.display} ({c.account})")
+    if unmatched_favorites:
+        # Wichtiger als die Treffer: ein Tippfehler in der Liste würde sonst nie
+        # auffallen — man sucht den Fehler am Telefon statt in der Config.
+        lines.append(f"  ACHTUNG, ohne Treffer: {', '.join(unmatched_favorites)}")
+    lines.append("")
+
     # Faxnummern gesondert: sie stehen spec-konform im XML, das WP826 zeigt den
     # Fax-Slot aber NICHT an (am Gerät geprüft). Sie hier stillschweigend unter
     # "verlustfrei" mitzuzählen wäre eine Lüge — am Telefon sind sie unsichtbar.
@@ -459,9 +542,10 @@ def main(argv=None):
     if not contacts:
         print(f"Keine Kontakte gefunden unter {source_base} für {accounts}", file=sys.stderr)
         return 1
+    unmatched = mark_favorites(contacts, cfg.get("favorites"))
 
     if args.report:
-        print(build_report(contacts))
+        print(build_report(contacts, unmatched))
         return 0
 
     xml = to_grandstream_xml(contacts)

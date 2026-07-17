@@ -35,6 +35,10 @@ DEFAULTS = {
     "accounts": ["Familie"],
     "source_base": "/Volumes/macmini_data/iCloudSync",
     # 0.0.0.0, damit das WLAN-Telefon drankommt; reines Loopback wäre nutzlos.
+    # Namen (wie am Telefon angezeigt, inkl. Spitzname) oder Rufnummern.
+    # iCloud kennt kein Favoriten-Flag, und eine am Telefon gesetzte Markierung
+    # überlebt den nächsten Download nicht — sie muss aus dem XML kommen.
+    "favorites": [],
     "bind": "0.0.0.0",
     "port": 8081,
     "basic_auth_user": "wp826",
